@@ -2,7 +2,7 @@
 Livermore AI — ICC Detection Engine
 Detects Indication / Correction / Continuation patterns on 1H charts
 """
-import numpy as np
+
 from dataclasses import dataclass
 from typing import Optional
 from enum import Enum
