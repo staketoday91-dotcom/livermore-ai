@@ -1,0 +1,41 @@
+services:
+  - type: web
+    name: livermore-ai-backend
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: DATABASE_URL
+        value: postgresql://forgebot_user:fgTNL98aqeN78qZLOtZnorRy0atno9vT@dpg-d747ou63jp1c738uhrb0-a.oregon-postgres.render.com/forgebot
+      - key: POLYGON_API_KEY
+        sync: false
+      - key: TRADIER_API_KEY
+        sync: false
+      - key: UNUSUAL_WHALES_TOKEN
+        sync: false
+      - key: DISCORD_BOT_TOKEN
+        sync: false
+      - key: DISCORD_GUILD_ID
+        sync: false
+      - key: DISCORD_FREE_CHANNEL
+        sync: false
+      - key: DISCORD_TIER1_CHANNEL
+        sync: false
+      - key: DISCORD_TIER2_CHANNEL
+        sync: false
+      - key: DISCORD_TIER3_CHANNEL
+        sync: false
+      - key: DISCORD_VICTORIES_CHANNEL
+        sync: false
+      - key: DISCORD_MOTIVATIONAL_CHANNEL
+        sync: false
+      - key: DISCORD_ROLE_TIER1
+        sync: false
+      - key: DISCORD_ROLE_TIER2
+        sync: false
+      - key: DISCORD_ROLE_TIER3
+        sync: false
+      - key: SECRET_KEY
+        generateValue: true
+      - key: PORT
+        value: "8000"
