@@ -1,77 +1,44 @@
 """
 Livermore AI — Discord Bot
-Handles alerts, motivational messages, tier gating, and daily reports
+Alertas automaticas, mensajes diarios, reportes
 """
 import os
+import logging
+import asyncio
+from datetime import datetime, time
+import pytz
 import discord
 from discord.ext import commands, tasks
-from datetime import datetime, time
-import asyncio
-import random
-import pytz
 
-NY_TZ = pytz.timezone("America/New_York")
+logger = logging.getLogger("livermore.discord")
+NY_TZ  = pytz.timezone("America/New_York")
 
-GUILD_ID          = int(os.getenv("DISCORD_GUILD_ID", "0"))
-FREE_CHANNEL      = int(os.getenv("DISCORD_FREE_CHANNEL", "0"))
-TIER1_CHANNEL     = int(os.getenv("DISCORD_TIER1_CHANNEL", "0"))
-TIER2_CHANNEL     = int(os.getenv("DISCORD_TIER2_CHANNEL", "0"))
-TIER3_CHANNEL     = int(os.getenv("DISCORD_TIER3_CHANNEL", "0"))
-VICTORIES_CHANNEL = int(os.getenv("DISCORD_VICTORIES_CHANNEL", "0"))
-MOTIVE_CHANNEL    = int(os.getenv("DISCORD_MOTIVATIONAL_CHANNEL", "0"))
+# ─── Channel IDs ─────────────────────────────────────────────────────────────
+GUILD_ID         = int(os.getenv("DISCORD_GUILD_ID",         "0"))
+FREE_CH          = int(os.getenv("DISCORD_FREE_CHANNEL",     "0"))
+TIER1_CH         = int(os.getenv("DISCORD_TIER1_CHANNEL",    "0"))
+TIER2_CH         = int(os.getenv("DISCORD_TIER2_CHANNEL",    "0"))
+TIER3_CH         = int(os.getenv("DISCORD_TIER3_CHANNEL",    "0"))
+VIP_CH           = int(os.getenv("DISCORD_VIP_CHANNEL",      "0"))
+VICTORIES_CH     = int(os.getenv("DISCORD_VICTORIES_CHANNEL","0"))
+MOTIVACION_CH    = int(os.getenv("DISCORD_MOTIVACION_CHANNEL","0"))
 
-ROLE_TIER1 = int(os.getenv("DISCORD_ROLE_TIER1", "0"))
-ROLE_TIER2 = int(os.getenv("DISCORD_ROLE_TIER2", "0"))
-ROLE_TIER3 = int(os.getenv("DISCORD_ROLE_TIER3", "0"))
+# Tier → channel mapping
+TIER_CHANNELS = {
+    "ALERT":     [TIER1_CH],
+    "PREMIUM":   [TIER1_CH, TIER2_CH],
+    "LIVERMORE": [TIER1_CH, TIER2_CH, TIER3_CH, VIP_CH],
+}
 
-
-MOTIVATIONAL_MESSAGES = [
-    {
-        "title": "El tape nunca miente",
-        "body": "Livermore lo dijo hace 100 años y sigue siendo verdad hoy. No es lo que crees que va a pasar — es lo que el mercado *está* diciendo ahora mismo. El flujo institucional no tiene ego. No tiene miedo. Solo tiene intención. Aprende a leerlo.",
-        "lesson": "El mercado es más sabio que cualquier opinión. Síguelo, no lo discutas."
-    },
-    {
-        "title": "Paciencia es la habilidad más cara del trading",
-        "body": "Druckenmiller pasó semanas esperando el setup correcto antes del trade de Soros contra la libra. No entró antes. No 'casi entró'. Esperó la confluencia perfecta y puso todo. El 80% del trading es no hacer nada.",
-        "lesson": "Un trade al mes con el setup correcto vale más que 20 trades con prisa."
-    },
-    {
-        "title": "El dark pool no habla — actúa",
-        "body": "Cuando ves un print de $2M por encima del VWAP en pre-market, alguien que mueve millones ya tomó su decisión. No están en Twitter discutiendo niveles. Ya compraron. Tu trabajo es seguir la huella, no predecir.",
-        "lesson": "Sigue el dinero real, no el ruido."
-    },
-    {
-        "title": "Livermore perdió fortunas — y las recuperó",
-        "body": "Jesse Livermore quebró cuatro veces y cada vez reconstruyó su fortuna. No porque tuviera suerte — porque entendía que el mercado es un juego de probabilidades, no de certezas. Una pérdida no es el fin. Es información.",
-        "lesson": "Tu stop loss no es una derrota. Es el costo de operar con disciplina."
-    },
-    {
-        "title": "El ICC te dice cuándo — el flujo te dice quién",
-        "body": "El patrón ICC te muestra la estructura técnica. Pero cuando combinas eso con un dark pool cluster de $1.5M y un golden sweep de 3,000 contratos en el ask — eso ya no es análisis técnico. Eso es seguir a los que saben.",
-        "lesson": "La confluencia de señales elimina la duda. Si el setup no confluye — no entras."
-    },
-    {
-        "title": "La prima es el sueldo, la dirección es el bono",
-        "body": "Los traders más consistentes no son los que atrapan el 10x. Son los que cobran prima cada mes cuando el mercado está lateral, y luego agarran el movimiento cuando el ICC confirma. Dos motores. Siempre trabajando.",
-        "lesson": "En chop vendes prima. En tendencia sigues el flujo. El mercado siempre da algo."
-    },
-    {
-        "title": "Un collar a tiempo vale más que un margin call",
-        "body": "JPMorgan no corre el JHEQX por diversión. Lo corre porque saben que proteger las ganancias es tan importante como hacerlas. Si tu posición lleva 90 días en verde — ese verde ya te pertenece. Protégelo.",
-        "lesson": "Las ganancias no realizadas pueden desaparecer. Un collar es un seguro de vida para tu trade."
-    },
-    {
-        "title": "El pre-market es el tape más honesto del día",
-        "body": "Sin opciones activas. Sin retail. Solo institucionales moviendo capital con intención pura. Cuando ves volumen 2x el día anterior en pre-market — alguien ya sabe algo. Livermore habría estado despierto a las 8am todos los días.",
-        "lesson": "El pre-market es tu ventaja competitiva. La mayoría lo ignora."
-    },
-]
-
-DAILY_MORNING_MESSAGES = [
-    "Buenos días. El mercado abre en {mins} minutos. El sistema está escaneando {tickers} tickers. Que el tape te hable claro hoy.",
-    "Apertura en {mins} minutos. Pre-market activity detectada en {hot_tickers}. El sistema está listo.",
-    "Nuevo día. Nuevas oportunidades. El sistema ha procesado el overnight flow. Watchlist activa: {tickers} tickers bajo vigilancia.",
+LIVERMORE_QUOTES = [
+    "El mercado nunca miente — aprende a leerlo.",
+    "La gran fortuna espera al trader que estudia sus movimientos antes de actuar.",
+    "No es el pensamiento lo que hace el dinero — es la paciencia.",
+    "El precio es la única opinión que importa.",
+    "Nunca discutas con el tape. El tape siempre tiene razón.",
+    "Los mercados no son aleatorios — son el reflejo de la codicia y el miedo humano.",
+    "Compra en el breakout, vende en la debilidad. El timing lo es todo.",
+    "El trader exitoso actúa — el trader perdedor reacciona.",
 ]
 
 
@@ -80,341 +47,260 @@ class LivermoreBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         intents.message_content = True
-        intents.members = True
         super().__init__(command_prefix="!", intents=intents)
-        self.scanner = None
+        self._quote_index = 0
 
     async def setup_hook(self):
-        self.morning_message.start()
-        self.pre_open_briefing.start()
-        self.midday_report.start()
-        self.close_report.start()
-        self.evening_livermore.start()
-        print("✓ Discord bot tasks started")
+        self.daily_tasks.start()
+        logger.info("Discord bot tasks iniciados")
 
     async def on_ready(self):
-        print(f"✓ Livermore Bot online as {self.user}")
-
-    # ─── ALERT SENDER ────────────────────────────────────────
-    async def send_alert(self, result: dict, alert_id: int):
-        """Send formatted alert to appropriate tier channels"""
-        channels = result.get("channels", [])
-        score    = result["score"]
-        ticker   = result["ticker"]
-
-        # Determine which Discord channels to post to
-        if 1 in channels:
-            await self._post_alert_tier1(result, alert_id)
-        if 2 in channels:
-            await self._post_alert_tier2(result, alert_id)
-        if 3 in channels:
-            await self._post_alert_tier3(result, alert_id)
-
-        # Always post teaser to free channel (delayed, no contract)
-        await self._post_free_teaser(result)
-
-    async def _post_free_teaser(self, result: dict):
-        """Teaser for free channel — no contract details"""
-        ch = self.get_channel(FREE_CHANNEL)
-        if not ch:
-            return
-
-        score = result["score"]
-        tier  = result["tier"]
-        emoji = "🔶" if tier == "ALERT" else "🔥" if tier == "PREMIUM" else "⚡"
-
-        embed = discord.Embed(
-            title=f"{emoji} Señal detectada — {result['ticker']}",
-            color=0xC9A84C,
-        )
-        embed.add_field(name="Score", value=f"**{score}/100**", inline=True)
-        embed.add_field(name="Dirección", value=result["direction"], inline=True)
-        embed.add_field(name="Régimen", value=result["regime"], inline=True)
-        embed.add_field(
-            name="Detalles completos",
-            value="🔒 Contrato, niveles exactos y señal completa disponibles en Tier 1+\n[Acceder aquí](https://whop.com/livermore-ai)",
-            inline=False
-        )
-        embed.set_footer(text=f"Livermore AI • {datetime.now(NY_TZ).strftime('%I:%M %p ET')}")
-        await ch.send(embed=embed)
-
-    async def _post_alert_tier1(self, result: dict, alert_id: int):
-        """Full alert for Tier 1"""
-        ch = self.get_channel(TIER1_CHANNEL)
-        if not ch:
-            return
-
-        score = result["score"]
-        color = 0x2ecc71 if score >= 90 else 0xC9A84C
-
-        embed = discord.Embed(
-            title=f"🎯 {result['ticker']} — Score {score}/100",
-            description=f"**{result['reason'][:200]}**",
-            color=color,
-        )
-        embed.add_field(name="Contrato", value=result.get("contract", "Stock"), inline=False)
-        embed.add_field(name="Entrada", value=f"${result['entry']:.2f}", inline=True)
-        embed.add_field(name="Stop Loss", value=f"${result['stop_loss']:.2f}", inline=True)
-        embed.add_field(name="Target 1", value=f"${result['target1']:.2f}", inline=True)
-        embed.add_field(name="Target 2", value=f"${result['target2']:.2f}", inline=True)
-        embed.add_field(name="Sesión", value=result["session"], inline=True)
-        embed.add_field(name="ICC Signal", value=result["icc_signal"], inline=True)
-
-        score_text = (f"ICC: {result['score_breakdown']['icc']}/35 | "
-                     f"DP: {result['score_breakdown']['dark_pool']}/30 | "
-                     f"Flow: {result['score_breakdown']['options']}/25")
-        embed.add_field(name="Score breakdown", value=score_text, inline=False)
-        embed.set_footer(text=f"Alert #{alert_id} • {datetime.now(NY_TZ).strftime('%I:%M %p ET')}")
-        await ch.send(embed=embed)
-
-    async def _post_alert_tier2(self, result: dict, alert_id: int):
-        """Enhanced alert for Tier 2 — adds pre/post market context"""
-        ch = self.get_channel(TIER2_CHANNEL)
-        if not ch:
-            return
-
-        embed = discord.Embed(
-            title=f"⚡ {result['ticker']} — PREMIUM {result['score']}/100",
-            color=0x9B59B6,
-        )
-        embed.add_field(name="Contrato", value=result.get("contract", "Stock"), inline=False)
-        embed.add_field(name="Entrada", value=f"${result['entry']:.2f}", inline=True)
-        embed.add_field(name="SL", value=f"${result['stop_loss']:.2f}", inline=True)
-        embed.add_field(name="TP1 / TP2", value=f"${result['target1']:.2f} / ${result['target2']:.2f}", inline=True)
-        if result.get("delta"):
-            embed.add_field(name="Delta", value=f"{result['delta']:.2f}", inline=True)
-        if result.get("premium"):
-            embed.add_field(name="Prima", value=f"${result['premium']:.2f}", inline=True)
-        embed.add_field(name="Señal", value=result["reason"][:300], inline=False)
-        embed.set_footer(text=f"Alert #{alert_id} • Tier 2 • {datetime.now(NY_TZ).strftime('%I:%M %p ET')}")
-        await ch.send(embed=embed)
-
-    async def _post_alert_tier3(self, result: dict, alert_id: int):
-        """VIP alert for Tier 3 — full detail + early delivery"""
-        ch = self.get_channel(TIER3_CHANNEL)
-        if not ch:
-            return
-
-        embed = discord.Embed(
-            title=f"🏆 LIVERMORE SIGNAL — {result['ticker']} {result['score']}/100",
-            description="**Score máximo — confluencia total detectada**",
-            color=0xE74C3C,
-        )
-        embed.add_field(name="Contrato exacto", value=result.get("contract", "Stock directional"), inline=False)
-        embed.add_field(name="Entrada", value=f"${result['entry']:.2f}", inline=True)
-        embed.add_field(name="Stop Loss", value=f"${result['stop_loss']:.2f}", inline=True)
-        embed.add_field(name="TP1", value=f"${result['target1']:.2f}", inline=True)
-        embed.add_field(name="TP2", value=f"${result['target2']:.2f}", inline=True)
-        if result.get("delta"):
-            embed.add_field(name="Delta", value=f"{result['delta']:.2f}", inline=True)
-        if result.get("expiration"):
-            embed.add_field(name="Exp.", value=result["expiration"], inline=True)
-
-        score_text = (f"ICC: {result['score_breakdown']['icc']}/35 | "
-                     f"Dark Pool: {result['score_breakdown']['dark_pool']}/30 | "
-                     f"Flow: {result['score_breakdown']['options']}/25 | "
-                     f"Macro: {result['score_breakdown']['macro']}/10")
-        embed.add_field(name="Score completo", value=score_text, inline=False)
-        embed.add_field(name="Señal detectada", value=result["reason"][:400], inline=False)
-        embed.set_footer(text=f"Alert #{alert_id} • Tier 3 VIP • {datetime.now(NY_TZ).strftime('%I:%M %p ET')}")
-        await ch.send(embed=embed)
-
-    # ─── VICTORY ANNOUNCEMENT ─────────────────────────────────
-    async def announce_victory(self, ticker: str, pnl_pct: float, pnl_dollar: float, contract: str):
-        """Post win to public victories channel"""
-        ch = self.get_channel(VICTORIES_CHANNEL)
-        if not ch:
-            return
-
-        embed = discord.Embed(
-            title=f"✅ WIN — {ticker}",
-            description=f"**+{pnl_pct:.1f}% | +${pnl_dollar:,.0f}**",
-            color=0x2ECC71,
-        )
-        embed.add_field(name="Contrato", value=contract, inline=True)
-        embed.add_field(name="Ganancia", value=f"**+${pnl_dollar:,.0f}**", inline=True)
-        embed.add_field(
-            name="Acceso completo",
-            value="Los miembros Tier 1+ recibieron esta señal antes. [Únete aquí](https://whop.com/livermore-ai)",
-            inline=False
-        )
-        embed.set_footer(text=f"Livermore AI • Sala de Victorias")
-        await ch.send(embed=embed)
-
-    # ─── SCHEDULED TASKS ──────────────────────────────────────
-
-    @tasks.loop(time=time(7, 0, tzinfo=NY_TZ))
-    async def morning_message(self):
-        """7:00am — Good morning message"""
-        ch = self.get_channel(MOTIVE_CHANNEL)
-        if not ch:
-            return
-
-        now = datetime.now(NY_TZ)
-        if now.weekday() >= 5:
-            return
-
-        embed = discord.Embed(
-            title="Buenos días — El mercado abre en 2h30m",
-            description="El sistema Livermore AI ha procesado el overnight flow y está listo para el día.",
-            color=0xC9A84C,
-        )
-        embed.add_field(
-            name="Qué vigilar hoy",
-            value="Flujo pre-market activo en: **NVDA, AAPL, SPY**\nVIX estable. Sin eventos macro mayores.",
-            inline=False
-        )
-        embed.add_field(
-            name="Livermore dice:",
-            value="*'La gran fortuna espera al trader que estudia sus movimientos antes de actuar. El mercado siempre avisa — la mayoría simplemente no escucha.'*",
-            inline=False
-        )
-        embed.set_footer(text="Livermore AI • 7:00 AM ET")
-        await ch.send(embed=embed)
-
-    @tasks.loop(time=time(9, 15, tzinfo=NY_TZ))
-    async def pre_open_briefing(self):
-        """9:15am — Pre-market briefing"""
-        ch = self.get_channel(TIER1_CHANNEL)
-        if not ch:
-            return
-
-        now = datetime.now(NY_TZ)
-        if now.weekday() >= 5:
-            return
-
-        embed = discord.Embed(
-            title="Pre-apertura — 15 minutos",
-            description="Resumen del pre-market para miembros Tier 1+",
-            color=0x3B8FD4,
-        )
-        embed.add_field(name="Sesión pre-market", value="Revisando dark pool overnight...", inline=False)
-        embed.add_field(name="Apertura NYSE", value="9:30 AM ET", inline=True)
-        embed.add_field(name="Sistema", value="Activo — escaneando", inline=True)
-        embed.set_footer(text="Livermore AI • Pre-Market Briefing")
-        await ch.send(embed=embed)
-
-    @tasks.loop(time=time(12, 0, tzinfo=NY_TZ))
-    async def midday_report(self):
-        """12:00pm — Midday performance update"""
-        ch = self.get_channel(TIER1_CHANNEL)
-        if not ch:
-            return
-
-        now = datetime.now(NY_TZ)
-        if now.weekday() >= 5:
-            return
-
-        from core.models import Alert, SessionLocal
-        try:
-            db = SessionLocal()
-            today = datetime.now(NY_TZ).date()
-            alerts_today = db.query(Alert).filter(
-                Alert.created_at >= datetime.combine(today, time(0, 0))
-            ).all()
-            db.close()
-
-            wins = [a for a in alerts_today if a.status == "win"]
-            open_alerts = [a for a in alerts_today if a.status == "open"]
-
-            embed = discord.Embed(
-                title="Reporte del mediodía",
-                color=0xC9A84C,
+        logger.info(f"Bot conectado como {self.user} — Guild: {GUILD_ID}")
+        await self.change_presence(
+            activity=discord.Activity(
+                type=discord.ActivityType.watching,
+                name="el tape — Livermore AI"
             )
-            embed.add_field(name="Alertas hoy", value=str(len(alerts_today)), inline=True)
-            embed.add_field(name="Wins", value=str(len(wins)), inline=True)
-            embed.add_field(name="En curso", value=str(len(open_alerts)), inline=True)
+        )
 
-            if open_alerts:
-                tickers = ", ".join(set(a.ticker for a in open_alerts[:5]))
-                embed.add_field(name="Posiciones abiertas", value=tickers, inline=False)
+    def _get_channel(self, channel_id: int):
+        return self.get_channel(channel_id)
 
-            embed.set_footer(text="Livermore AI • Midday Report")
-            await ch.send(embed=embed)
-        except Exception as e:
-            print(f"Midday report error: {e}")
+    # ─── ALERTA PRINCIPAL ────────────────────────────────────────────────────
+    async def send_alert(self, result: dict, alert_id: int = 0):
+        """Envia alerta a los canales correspondientes segun tier"""
+        tier     = result.get("tier", "ALERT")
+        score    = result.get("score", 0)
+        ticker   = result.get("ticker", "")
+        contract = result.get("contract", "")
+        entry    = result.get("entry", 0)
+        sl       = result.get("stop_loss", 0)
+        tp1      = result.get("target1", 0)
+        tp2      = result.get("target2", 0)
+        reason   = result.get("reason", "")
+        direction = result.get("direction", "BULLISH")
+        breakdown = result.get("score_breakdown", {})
+        session  = result.get("session", "REGULAR")
+        regime   = result.get("regime", "")
 
-    @tasks.loop(time=time(16, 30, tzinfo=NY_TZ))
-    async def close_report(self):
-        """4:30pm — End of day summary"""
-        ch = self.get_channel(TIER1_CHANNEL)
+        now_et = datetime.now(NY_TZ).strftime("%I:%M %p ET")
+
+        # Color por tier
+        color = {
+            "LIVERMORE": 0xD4A832,   # dorado
+            "PREMIUM":   0xE8921A,   # amber
+            "ALERT":     0x4A9E6B,   # verde
+        }.get(tier, 0x4A9E6B)
+
+        # Emoji por direccion
+        dir_emoji = "🟢" if direction == "BULLISH" else "🔴"
+        dir_text  = "ALCISTA" if direction == "BULLISH" else "BAJISTA"
+
+        # Score bars
+        def bar(val, max_val):
+            filled = round((val / max_val) * 8)
+            return "█" * filled + "░" * (8 - filled)
+
+        # ─── EMBED PRINCIPAL ─────────────────────────────────────────────────
+        embed = discord.Embed(
+            title=f"{dir_emoji} {ticker} — Score {score}/100",
+            color=color,
+            timestamp=datetime.now(NY_TZ)
+        )
+
+        embed.set_author(name=f"Livermore AI — {tier}", icon_url="")
+
+        if contract:
+            embed.add_field(
+                name="Contrato recomendado",
+                value=f"```{contract}```",
+                inline=False
+            )
+
+        embed.add_field(
+            name="Niveles",
+            value=(
+                f"```\n"
+                f"Entrada:   ${entry:.2f}\n"
+                f"Stop Loss: ${sl:.2f}\n"
+                f"Target 1:  ${tp1:.2f}\n"
+                f"Target 2:  ${tp2:.2f}\n"
+                f"```"
+            ),
+            inline=True
+        )
+
+        embed.add_field(
+            name="Score breakdown",
+            value=(
+                f"```\n"
+                f"ICC        {bar(breakdown.get('icc', 0), 35)} {breakdown.get('icc', 0)}/35\n"
+                f"Dark Pool  {bar(breakdown.get('dark_pool', 0), 30)} {breakdown.get('dark_pool', 0)}/30\n"
+                f"Flow       {bar(breakdown.get('options', 0), 25)} {breakdown.get('options', 0)}/25\n"
+                f"Macro      {bar(max(breakdown.get('macro', 0), 0), 10)} {breakdown.get('macro', 0)}/10\n"
+                f"```"
+            ),
+            inline=True
+        )
+
+        embed.add_field(
+            name="Senales activas",
+            value=reason[:200] if reason else "—",
+            inline=False
+        )
+
+        embed.set_footer(text=f"Sesion: {session} | Regimen: {regime} | {now_et} | ID #{alert_id}")
+
+        # ─── ENVIAR A CANALES DEL TIER ────────────────────────────────────────
+        channels_to_notify = TIER_CHANNELS.get(tier, [TIER1_CH])
+
+        for ch_id in channels_to_notify:
+            ch = self._get_channel(ch_id)
+            if ch:
+                try:
+                    await ch.send(embed=embed)
+                except Exception as e:
+                    logger.error(f"Error enviando a canal {ch_id}: {e}")
+
+        # Teaser en free channel (sin contrato ni niveles completos)
+        free_ch = self._get_channel(FREE_CH)
+        if free_ch:
+            teaser = discord.Embed(
+                title=f"{dir_emoji} Senal detectada — {ticker}",
+                description=(
+                    f"Score: **{score}/100** | Tier: **{tier}** | {dir_text}\n\n"
+                    f"*Contrato y niveles disponibles para suscriptores.*\n"
+                    f"Upgrade en whop.com/livermore-ai"
+                ),
+                color=0x2a2a2a
+            )
+            teaser.set_footer(text=f"Livermore AI | {now_et}")
+            try:
+                await free_ch.send(embed=teaser)
+            except Exception as e:
+                logger.error(f"Error en free channel: {e}")
+
+    # ─── WIN ANNOUNCEMENT ────────────────────────────────────────────────────
+    async def send_victory(self, ticker: str, contract: str, entry: float,
+                           exit_price: float, pnl_pct: float, alert_id: int = 0):
+        ch = self._get_channel(VICTORIES_CH)
         if not ch:
             return
 
+        emoji = "🏆" if pnl_pct >= 50 else "✅"
+        embed = discord.Embed(
+            title=f"{emoji} WIN — {ticker}",
+            color=0xD4A832,
+            timestamp=datetime.now(NY_TZ)
+        )
+        embed.add_field(name="Contrato", value=f"`{contract}`", inline=False)
+        embed.add_field(name="Entrada",  value=f"${entry:.2f}",      inline=True)
+        embed.add_field(name="Salida",   value=f"${exit_price:.2f}", inline=True)
+        embed.add_field(name="P&L",      value=f"+{pnl_pct:.0f}%",  inline=True)
+        embed.set_footer(text=f"Livermore AI | Alerta #{alert_id}")
+
+        await ch.send(embed=embed)
+
+    # ─── TAREAS DIARIAS ──────────────────────────────────────────────────────
+    @tasks.loop(minutes=1)
+    async def daily_tasks(self):
         now = datetime.now(NY_TZ)
-        if now.weekday() >= 5:
-            return
+        h, m = now.hour, now.minute
 
-        embed = discord.Embed(
-            title="Cierre del día — Resumen",
-            description="El mercado cerró. Revisando resultados del día.",
-            color=0x2ECC71,
-        )
-        embed.add_field(
-            name="Post-market",
-            value="El sistema continúa monitoreando dark pool y futuros. Los prints de post-market son inteligencia para mañana.",
-            inline=False
-        )
-        embed.add_field(
-            name="Setup de mañana",
-            value="Análisis overnight disponible a las 7:00 AM ET",
-            inline=False
-        )
-        embed.set_footer(text="Livermore AI • EOD Report")
-        await ch.send(embed=embed)
+        # 7:00 AM — Good morning
+        if h == 7 and m == 0:
+            await self._send_good_morning()
 
-    @tasks.loop(time=time(20, 0, tzinfo=NY_TZ))
-    async def evening_livermore(self):
-        """8:00pm — Motivational message"""
-        ch = self.get_channel(MOTIVE_CHANNEL)
+        # 9:15 AM — Pre-apertura briefing
+        elif h == 9 and m == 15:
+            await self._send_premarket_briefing()
+
+        # 4:30 PM — Cierre
+        elif h == 16 and m == 30:
+            await self._send_close_report()
+
+        # 8:00 PM — Motivacion
+        elif h == 20 and m == 0:
+            await self._send_motivacion()
+
+    @daily_tasks.before_loop
+    async def before_daily_tasks(self):
+        await self.wait_until_ready()
+
+    async def _send_good_morning(self):
+        ch = self._get_channel(MOTIVACION_CH)
         if not ch:
             return
-
-        msg = random.choice(MOTIVATIONAL_MESSAGES)
-
+        now_str = datetime.now(NY_TZ).strftime("%A, %B %d")
         embed = discord.Embed(
-            title=f"📖 {msg['title']}",
-            description=msg["body"],
-            color=0xC9A84C,
+            title="Buenos dias — Livermore AI",
+            description=(
+                f"**{now_str}**\n\n"
+                "El scanner está activo. Monitoreando SPY, QQQ, NVDA y 7 tickers más.\n\n"
+                "Pre-market briefing en 15 minutos en #alertas-tier1."
+            ),
+            color=0xD4A832
         )
-        embed.add_field(name="Lección del día", value=msg["lesson"], inline=False)
-        embed.set_footer(text="Livermore AI • Mensaje diario")
+        embed.set_footer(text="Livermore AI — El mercado nunca miente.")
         await ch.send(embed=embed)
 
-    # ─── COMMANDS ─────────────────────────────────────────────
-    @commands.command(name="stats")
-    async def stats_command(self, ctx):
-        """Show system stats"""
-        from core.models import Alert, SessionLocal
-        try:
-            db = SessionLocal()
-            total  = db.query(Alert).count()
-            wins   = db.query(Alert).filter(Alert.status == "win").count()
-            losses = db.query(Alert).filter(Alert.status == "loss").count()
-            open_  = db.query(Alert).filter(Alert.status == "open").count()
-            db.close()
+    async def _send_premarket_briefing(self):
+        ch = self._get_channel(TIER1_CH)
+        if not ch:
+            return
+        embed = discord.Embed(
+            title="Pre-apertura — 9:15 AM ET",
+            description=(
+                "Scanner activo. Primera ventana institucional: **9:30 - 11:00 AM**\n\n"
+                "Alertas activas cuando score >= 75.\n"
+                "Livermore alerts (95+) tienen prioridad maxima."
+            ),
+            color=0xE8921A
+        )
+        embed.set_footer(text="Livermore AI")
+        await ch.send(embed=embed)
 
-            wr = round(wins / (wins + losses) * 100, 1) if (wins + losses) > 0 else 0
+    async def _send_close_report(self):
+        ch = self._get_channel(TIER1_CH)
+        if not ch:
+            return
+        embed = discord.Embed(
+            title="Cierre de mercado — 4:30 PM ET",
+            description=(
+                "Sesion regular cerrada.\n\n"
+                "Revisa #sala-de-victorias para el P&L del dia.\n"
+                "Post-market activo hasta las 8:00 PM ET."
+            ),
+            color=0x4A9E6B
+        )
+        embed.set_footer(text="Livermore AI")
+        await ch.send(embed=embed)
 
-            embed = discord.Embed(title="Livermore AI — Estadísticas", color=0xC9A84C)
-            embed.add_field(name="Total alertas", value=str(total), inline=True)
-            embed.add_field(name="Win rate", value=f"{wr}%", inline=True)
-            embed.add_field(name="Abiertas", value=str(open_), inline=True)
-            await ctx.send(embed=embed)
-        except Exception as e:
-            await ctx.send(f"Error: {e}")
-
-    @commands.command(name="scan")
-    @commands.has_permissions(administrator=True)
-    async def manual_scan(self, ctx):
-        """Trigger manual scan"""
-        await ctx.send("⚡ Iniciando scan manual...")
-        if self.scanner:
-            await self.scanner.run_scan()
-            await ctx.send("✅ Scan completado")
-        else:
-            await ctx.send("❌ Scanner no inicializado")
+    async def _send_motivacion(self):
+        ch = self._get_channel(MOTIVACION_CH)
+        if not ch:
+            return
+        quote = LIVERMORE_QUOTES[self._quote_index % len(LIVERMORE_QUOTES)]
+        self._quote_index += 1
+        embed = discord.Embed(
+            description=f'*"{quote}"*\n\n— Jesse Livermore',
+            color=0x1a1a1a
+        )
+        embed.set_footer(text="Livermore AI — 8:00 PM ET")
+        await ch.send(embed=embed)
 
 
+# ─── RUNNER ──────────────────────────────────────────────────────────────────
 def create_bot() -> LivermoreBot:
     return LivermoreBot()
+
+
+async def run_bot(bot: LivermoreBot):
+    token = os.getenv("DISCORD_BOT_TOKEN", "")
+    if not token:
+        logger.warning("DISCORD_BOT_TOKEN no configurado — bot desactivado")
+        return
+    try:
+        await bot.start(token)
+    except Exception as e:
+        logger.error(f"Discord bot error: {e}")
