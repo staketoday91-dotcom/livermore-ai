@@ -48,9 +48,12 @@ def _ensure_schema():
 # ─── Lifespan — arranca bot + scanner ─────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    _ensure_schema()
-    Base.metadata.create_all(bind=engine)
-    logger.info("Livermore AI started — DB ready")
+    try:
+        _ensure_schema()
+        Base.metadata.create_all(bind=engine)
+        logger.info("Livermore AI started — DB ready")
+    except Exception as e:
+        logger.error(f"DB init fallo (app sigue arriba para servir /health): {e}")
 
     discord_bot = None
     try:
