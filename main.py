@@ -8,77 +8,50 @@ from typing import Optional
 from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
-from sqlalchemy import create_engine, Column, Integer, Float, String, Boolean, DateTime, Text, JSON
-from sqlalchemy.orm import declarative_base, sessionmaker, Session
+from sqlalchemy import inspect, text
+from sqlalchemy.orm import Session
 import pytz
+
+from core.models import Alert, WatchlistItem, Base, engine, SessionLocal, get_db
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("livermore")
 
-# ─── Database ─────────────────────────────────────────────────────────────────
-DATABASE_URL = os.getenv("DATABASE_URL", "").replace("postgresql://", "postgresql+psycopg2://")
-engine       = create_engine(DATABASE_URL, pool_pre_ping=True)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base         = declarative_base()
 
-
-class Alert(Base):
-    __tablename__ = "alerts"
-    id             = Column(Integer, primary_key=True, index=True)
-    ticker         = Column(String(10), nullable=False)
-    asset_type     = Column(String(20), default="OPTION")
-    mode           = Column(String(20), default="SWING")
-    score_total    = Column(Integer)
-    score_icc      = Column(Integer, default=0)
-    score_darkpool = Column(Integer, default=0)
-    score_flow     = Column(Integer, default=0)
-    score_regime   = Column(Integer, default=0)
-    tier           = Column(String(20), default="ALERT")
-    entry_price    = Column(Float)
-    stop_loss      = Column(Float)
-    target1        = Column(Float)
-    target2        = Column(Float)
-    contract       = Column(String(100))
-    strike         = Column(Float)
-    expiration     = Column(String(20))
-    delta          = Column(Float)
-    premium        = Column(Float)
-    signal_summary = Column(Text)
-    icc_phase      = Column(String(30))
-    icc_signal     = Column(String(30))
-    regime         = Column(String(30))
-    market_session = Column(String(10))
-    status         = Column(String(20), default="pending")
-    pnl_pct        = Column(Float)
-    pnl_dollar     = Column(Float)
-    sent_to_tiers  = Column(JSON, default=list)
-    created_at     = Column(DateTime, default=datetime.utcnow)
-
-
-class WatchlistItem(Base):
-    __tablename__ = "watchlist"
-    id         = Column(Integer, primary_key=True)
-    ticker     = Column(String(10), nullable=False)
-    notes      = Column(Text)
-    active     = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-
-def get_db():
-    db = SessionLocal()
+def _ensure_schema():
+    """
+    Self-healing migration: si la tabla 'alerts' existe con un esquema viejo
+    (por ejemplo tier INTEGER de una version anterior), la borramos para que
+    SQLAlchemy la recree con el esquema actual de core/models.py.
+    """
     try:
-        yield db
-    finally:
-        db.close()
+        inspector = inspect(engine)
+        if not inspector.has_table("alerts"):
+            return
+        cols = {c["name"]: str(c["type"]).upper() for c in inspector.get_columns("alerts")}
+        tier_type = cols.get("tier", "")
+        needs_drop = (
+            tier_type.startswith("INT")
+            or "score_macro" not in cols
+            or "current_price" not in cols
+            or "updated_at" not in cols
+        )
+        if needs_drop:
+            with engine.connect() as conn:
+                conn.execute(text("DROP TABLE IF EXISTS alerts CASCADE"))
+                conn.commit()
+            logger.warning("alerts table dropped — esquema viejo detectado, recreando")
+    except Exception as e:
+        logger.warning(f"_ensure_schema fallo (no fatal): {e}")
 
 
 # ─── Lifespan — arranca bot + scanner ─────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _ensure_schema()
     Base.metadata.create_all(bind=engine)
     logger.info("Livermore AI started — DB ready")
 
-    # Arrancar Discord bot
     discord_bot = None
     try:
         from bot.discord_bot import create_bot, run_bot
@@ -88,7 +61,6 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Discord bot no disponible: {e}")
 
-    # Arrancar scanner cada 5 minutos
     try:
         from core.scanner import LivermoreScanner
         from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -106,7 +78,7 @@ async def lifespan(app: FastAPI):
 
 
 # ─── App ──────────────────────────────────────────────────────────────────────
-app = FastAPI(title="Livermore AI", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="Livermore AI", version="1.0.1", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
@@ -130,22 +102,26 @@ async def dashboard():
 
 @app.get("/api/stats")
 async def get_stats(db: Session = Depends(get_db)):
-    total  = db.query(Alert).count()
-    wins   = db.query(Alert).filter(Alert.status == "win").count()
-    losses = db.query(Alert).filter(Alert.status == "loss").count()
-    closed = wins + losses
-    today  = datetime.utcnow().date()
-    today_alerts = db.query(Alert).filter(
-        Alert.created_at >= datetime(today.year, today.month, today.day)
-    ).count()
-    return {
-        "total":        total,
-        "today":        today_alerts,
-        "wins":         wins,
-        "losses":       losses,
-        "open":         db.query(Alert).filter(Alert.status == "pending").count(),
-        "win_rate":     round(wins / closed * 100, 1) if closed > 0 else 0,
-    }
+    try:
+        total  = db.query(Alert).count()
+        wins   = db.query(Alert).filter(Alert.status == "win").count()
+        losses = db.query(Alert).filter(Alert.status == "loss").count()
+        closed = wins + losses
+        today  = datetime.utcnow().date()
+        today_alerts = db.query(Alert).filter(
+            Alert.created_at >= datetime(today.year, today.month, today.day)
+        ).count()
+        return {
+            "total":    total,
+            "today":    today_alerts,
+            "wins":     wins,
+            "losses":   losses,
+            "open":     db.query(Alert).filter(Alert.status == "pending").count(),
+            "win_rate": round(wins / closed * 100, 1) if closed > 0 else 0,
+        }
+    except Exception as e:
+        logger.exception("get_stats error")
+        raise HTTPException(500, f"stats_error: {type(e).__name__}: {e}")
 
 
 @app.get("/api/alerts")
@@ -155,39 +131,46 @@ async def get_alerts(
     limit:  int           = Query(50),
     db: Session = Depends(get_db)
 ):
-    q = db.query(Alert).order_by(Alert.created_at.desc())
-    if status:
-        q = q.filter(Alert.status == status)
-    if tier:
-        q = q.filter(Alert.tier == tier.upper())
-    return [{
-        "id":        a.id,
-        "ticker":    a.ticker,
-        "tier":      a.tier,
-        "score":     a.score_total,
-        "direction": a.icc_phase,
-        "entry":     a.entry_price,
-        "sl":        a.stop_loss,
-        "tp1":       a.target1,
-        "tp2":       a.target2,
-        "contract":  a.contract,
-        "strike":    a.strike,
-        "expiration":a.expiration,
-        "delta":     a.delta,
-        "premium":   a.premium,
-        "signal":    a.signal_summary,
-        "regime":    a.regime,
-        "session":   a.market_session,
-        "status":    a.status,
-        "pnl":       a.pnl_pct,
-        "score_breakdown": {
-            "icc":       a.score_icc,
-            "dark_pool": a.score_darkpool,
-            "flow":      a.score_flow,
-            "macro":     a.score_regime,
-        },
-        "date": a.created_at.isoformat() if a.created_at else None,
-    } for a in q.limit(limit).all()]
+    try:
+        q = db.query(Alert).order_by(Alert.created_at.desc())
+        if status:
+            q = q.filter(Alert.status == status)
+        if tier:
+            try:
+                q = q.filter(Alert.tier == int(tier))
+            except ValueError:
+                pass
+        return [{
+            "id":        a.id,
+            "ticker":    a.ticker,
+            "tier":      a.tier,
+            "score":     a.score_total,
+            "direction": a.icc_phase,
+            "entry":     a.entry_price,
+            "sl":        a.stop_loss,
+            "tp1":       a.target1,
+            "tp2":       a.target2,
+            "contract":  a.contract,
+            "strike":    a.strike,
+            "expiration":a.expiration,
+            "delta":     a.delta,
+            "premium":   a.premium,
+            "signal":    a.signal_summary,
+            "regime":    a.regime,
+            "session":   a.market_session,
+            "status":    a.status,
+            "pnl":       a.pnl_pct,
+            "score_breakdown": {
+                "icc":       a.score_icc,
+                "dark_pool": a.score_darkpool,
+                "flow":      a.score_flow,
+                "macro":     getattr(a, "score_macro", None) or a.score_regime,
+            },
+            "date": a.created_at.isoformat() if a.created_at else None,
+        } for a in q.limit(limit).all()]
+    except Exception as e:
+        logger.exception("get_alerts error")
+        raise HTTPException(500, f"alerts_error: {type(e).__name__}: {e}")
 
 
 @app.patch("/api/alerts/{alert_id}")
