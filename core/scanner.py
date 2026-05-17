@@ -1,7 +1,7 @@
 """
-Livermore AI — Main Scanner
-Runs every 5 minutes during market hours
-Beta mode: Polygon + Tradier (UW desactivado)
+Livermore AI — Scanner Principal
+Fuente unica: Unusual Whales API
+Corre cada 5 min en market hours
 """
 import asyncio
 import logging
@@ -11,16 +11,11 @@ import pytz
 
 from core.icc_engine import ICCDetector, RegimeDetector, ICCPhase, ICCDirection
 from core.scorer import LivermoreScorer, DarkPoolSignal, OptionsFlowSignal, MacroContext
-from core.fetcher import PolygonFetcher, TradierFetcher, UnusualWhalesFetcher
+from core.uw_fetcher import UWFetcher
 from core.models import Alert, WatchlistItem, SessionLocal
 
 logger = logging.getLogger("livermore.scanner")
 NY_TZ  = pytz.timezone("America/New_York")
-
-DEFAULT_WATCHLIST = [
-    "SPY", "QQQ", "NVDA", "AAPL", "TSLA",
-    "MSFT", "AMZN", "META", "GOOGL", "AMD",
-]
 
 
 class LivermoreScanner:
@@ -29,9 +24,7 @@ class LivermoreScanner:
         self.icc        = ICCDetector()
         self.regime_det = RegimeDetector()
         self.scorer     = LivermoreScorer()
-        self.polygon    = PolygonFetcher()
-        self.tradier    = TradierFetcher()
-        self.uw         = UnusualWhalesFetcher()   # desactivado, retorna listas vacias
+        self.uw         = UWFetcher()
         self.discord    = discord_bot
         self.alerts_today = set()
 
@@ -50,128 +43,174 @@ class LivermoreScanner:
 
     async def run_scan(self):
         if not self.is_market_hours():
-            logger.info("Outside market hours — skipping scan")
+            logger.info("Outside market hours — skipping")
             return
 
         session = self.get_session()
-        logger.info(f"Starting scan — session: {session}")
+        logger.info(f"Scan iniciado — {session}")
 
-        tickers = await self._get_watchlist()
+        # Market tide: contexto global antes de escanear tickers
+        market_tide = await self.uw.get_market_tide()
+        market_direction = market_tide.get("market_direction", "NEUTRAL") if market_tide else "NEUTRAL"
+        logger.info(f"Market Tide: {market_direction}")
+
+        # Tickers activos segun UW screener (no watchlist hardcoded)
+        tickers = await self._get_tickers()
         results = []
 
-        for ticker in tickers[:15]:   # cap conservador para plan free de Polygon
+        for ticker in tickers:
             try:
-                result = await self._analyze_ticker(ticker, session)
+                result = await self._analyze_ticker(ticker, session, market_tide)
                 if result:
                     results.append(result)
-                await asyncio.sleep(0.5)  # rate limit Polygon free tier
+                await asyncio.sleep(0.3)
             except Exception as e:
-                logger.error(f"Error analyzing {ticker}: {e}")
+                logger.error(f"Error {ticker}: {e}")
 
         results.sort(key=lambda x: x["score"], reverse=True)
+
         for result in results:
             if result["score"] >= 75:
                 await self._fire_alert(result)
 
-        logger.info(f"Scan complete — {len(results)} analizados, "
+        logger.info(f"Scan completo — {len(results)} analizados, "
                     f"{sum(1 for r in results if r['score'] >= 75)} alertas")
 
-    async def _analyze_ticker(self, ticker: str, session: str) -> Optional[dict]:
+    async def _analyze_ticker(self, ticker: str, session: str,
+                               market_tide: Optional[dict]) -> Optional[dict]:
 
-        # ─── 1. Precio y candles ─────────────────────────────
-        candles = await self.polygon.get_candles_1h(ticker)
-        if len(candles) < 10:
+        # ─── 1. Datos del ticker via UW ──────────────────────
+        ticker_data = await self.uw.get_ticker_data(ticker)
+        if not ticker_data:
             return None
 
-        snapshot = await self.polygon.get_snapshot(ticker)
-        current_price = snapshot.get("price", 0)
-        vwap          = snapshot.get("vwap", 0)
-        avg_vol       = await self.polygon.get_avg_volume(ticker)
-
+        current_price = ticker_data.get("prev_close", 0)
+        iv_rank       = ticker_data.get("iv_rank", 50)
         if not current_price:
             return None
 
-        # ─── 2. Regime ───────────────────────────────────────
-        adx    = self._estimate_adx(candles)
-        regime = self.regime_det.classify(adx, candles)
+        # ─── 2. Flow de opciones del ticker ──────────────────
+        flow_alerts = await self.uw.get_ticker_flow(ticker)
 
-        # ─── 3. ICC ──────────────────────────────────────────
-        icc_result = self.icc.detect(candles, avg_vol)
-        if icc_result.phase != ICCPhase.CONTINUATION:
-            return None
+        # ─── 3. Dark pool ─────────────────────────────────────
+        dp_raw = await self.uw.analyze_dark_pool(ticker, current_price)
 
-        # ─── 4. Options flow via Tradier (proxy UW) ──────────
-        opt_signal  = None
-        dp_signal   = None
-        flow_data   = await self.tradier.get_options_flow_proxy(ticker)
+        # ─── 4. Net premium ───────────────────────────────────
+        net_prem = await self.uw.get_net_premium(ticker)
 
-        direction = icc_result.direction
-        side_flow = flow_data.get("call") if direction == ICCDirection.BULLISH else flow_data.get("put")
+        # ─── 5. GEX ───────────────────────────────────────────
+        gex = await self.uw.get_gex(ticker)
 
-        if side_flow:
-            greeks    = side_flow.get("greeks") or {}
-            vol_oi    = side_flow.get("vol_oi_ratio", 0)
-            prem_est  = side_flow.get("premium_estimate", 0)
-            volume    = side_flow.get("volume") or 0
-            oi        = side_flow.get("open_interest") or 1
-            delta     = abs(greeks.get("delta", 0.5))
+        # ─── 6. Earnings DTE ──────────────────────────────────
+        earnings_dte = await self.uw.get_earnings_dte(ticker)
 
-            is_sweep        = vol_oi >= 3.0
-            is_golden_sweep = vol_oi >= 5.0 and prem_est >= 250_000
+        # ─── 7. Determinar direccion via net premium ──────────
+        direction = ICCDirection.BULLISH
+        if net_prem:
+            if net_prem.get("bearish_pressure"):
+                direction = ICCDirection.BEARISH
 
-            opt_signal = OptionsFlowSignal(
-                volume=volume,
-                open_interest=oi,
-                vol_oi_ratio=vol_oi,
-                executed_ask=0.80 if is_sweep else 0.60,  # estimado
-                premium_total=prem_est,
-                is_sweep=is_sweep,
-                is_golden_sweep=is_golden_sweep,
-                delta=delta,
-                iv_rank=50.0,   # TODO: calcular de IV historica
-                expiration_dte=30,
-                contract=side_flow.get("symbol", ""),
+        # Confirmar con market tide
+        if market_tide:
+            tide_dir = market_tide.get("market_direction", "NEUTRAL")
+            if tide_dir == "BEARISH" and direction == ICCDirection.BULLISH:
+                # Contra la marea — reducir conviccion
+                pass
+
+        # ─── 8. ICC simulado con net premium como proxy ───────
+        # Sin candles 1H de UW Basic, usamos net premium como señal de
+        # continuation: call premium sube = continuation bullish
+        icc_score = 0
+        icc_phase = ICCPhase.NONE
+
+        if net_prem:
+            call_prem = float(net_prem.get("net_call_premium", 0))
+            put_prem  = float(net_prem.get("net_put_premium", 0))
+            call_trend = float(net_prem.get("call_trend", 0))
+
+            if direction == ICCDirection.BULLISH:
+                if call_prem > 0:
+                    icc_score += 15
+                if call_trend > 0:
+                    icc_score += 10
+                    icc_phase = ICCPhase.CONTINUATION
+                if call_prem > 200_000:
+                    icc_score += 10
+            else:
+                if put_prem < 0:
+                    icc_score += 15
+                if float(net_prem.get("put_trend", 0)) < 0:
+                    icc_score += 10
+                    icc_phase = ICCPhase.CONTINUATION
+
+        if icc_phase != ICCPhase.CONTINUATION:
+            return None  # Solo alertar en continuation
+
+        # ─── 9. Construir señal de dark pool ──────────────────
+        dp_signal = None
+        if dp_raw and dp_raw.get("print_size", 0) > 100_000:
+            dp_signal = DarkPoolSignal(
+                print_price=dp_raw["print_price"],
+                print_size=dp_raw["print_size"],
+                above_vwap=dp_raw["above_vwap"],
+                cluster=dp_raw["cluster"],
+                absorption=dp_raw["absorption"],
+                session=dp_raw["session"],
+                velocity=dp_raw["velocity"],
             )
 
-            # Dark pool proxy: si hay actividad fuerte de opciones = acumulacion
-            if prem_est >= 100_000:
-                dp_signal = DarkPoolSignal(
-                    print_price=current_price,
-                    print_size=prem_est * 5,  # estimado equity equivalente
-                    above_vwap=current_price > vwap if vwap > 0 else False,
-                    cluster=vol_oi >= 3,
-                    absorption=False,
-                    session=session,
-                    velocity="BURST" if vol_oi >= 5 else "STEADY",
-                )
+        # ─── 10. Construir señal de opciones flow ─────────────
+        opt_signal = None
+        if flow_alerts:
+            best = max(flow_alerts, key=lambda f: float(f.get("total_premium", 0)))
+            total_prem = float(best.get("total_premium", 0))
+            vol_oi     = float(best.get("volume_oi_ratio", 0))
+            has_sweep  = best.get("has_sweep", False)
+            has_floor  = best.get("has_floor", False)
+            ask_prem   = float(best.get("total_ask_side_prem", 0))
+            executed_ask = ask_prem / total_prem if total_prem > 0 else 0
 
-        # ─── 5. Contrato recomendado ─────────────────────────
-        contract = None
-        if direction == ICCDirection.BULLISH:
-            contract = await self.tradier.find_best_contract(ticker, "CALL")
-        elif direction == ICCDirection.BEARISH:
-            contract = await self.tradier.find_best_contract(ticker, "PUT")
+            is_golden = (has_sweep or has_floor) and total_prem >= 500_000 and vol_oi >= 5
 
-        # ─── 6. Macro ────────────────────────────────────────
-        macro = MacroContext(market_session=session, vix_level=15.0)
+            opt_signal = OptionsFlowSignal(
+                volume=int(best.get("volume", 0)),
+                open_interest=int(best.get("open_interest", 1)),
+                vol_oi_ratio=vol_oi,
+                executed_ask=executed_ask,
+                premium_total=total_prem,
+                is_sweep=has_sweep,
+                is_golden_sweep=is_golden,
+                delta=0.50,
+                iv_rank=iv_rank,
+                expiration_dte=30,
+                contract=best.get("option_chain", ""),
+            )
 
-        # ─── 7. Niveles ──────────────────────────────────────
-        entry = icc_result.entry_zone or current_price
-        sl = icc_result.invalidation or (
-            entry * 0.98 if direction == ICCDirection.BULLISH else entry * 1.02
+        # ─── 11. Macro context ────────────────────────────────
+        macro = MacroContext(
+            has_earnings=earnings_dte <= 5,
+            earnings_dte=earnings_dte,
+            market_session=session,
+            vix_level=15.0,
         )
-        if direction == ICCDirection.BULLISH:
-            tp1 = entry + (entry - sl) * 2
-            tp2 = entry + (entry - sl) * 3.5
-        else:
-            tp1 = entry - (sl - entry) * 2
-            tp2 = entry - (sl - entry) * 3.5
 
-        # ─── 8. Score ────────────────────────────────────────
+        # ─── 12. Niveles de precio ────────────────────────────
+        entry = current_price
+        sl    = entry * 0.97 if direction == ICCDirection.BULLISH else entry * 1.03
+        tp1   = entry * 1.06 if direction == ICCDirection.BULLISH else entry * 0.94
+        tp2   = entry * 1.10 if direction == ICCDirection.BULLISH else entry * 0.90
+
+        # ─── 13. ADX estimado via GEX ─────────────────────────
+        adx = 25.0  # default trending
+        regime = "TRENDING_UP" if direction == ICCDirection.BULLISH else "TRENDING_DOWN"
+        if gex and not gex.get("gex_positive"):
+            adx = 28.0  # GEX negativo = moves mas fuertes
+
+        # ─── 14. Score final ──────────────────────────────────
         score_result = self.scorer.score(
             ticker=ticker,
-            icc_score=icc_result.score,
-            icc_direction=direction.value if direction else "NEUTRAL",
+            icc_score=icc_score,
+            icc_direction=direction.value,
             entry_price=entry,
             stop_loss=sl,
             target1=tp1,
@@ -183,24 +222,30 @@ class LivermoreScanner:
             regime=regime,
         )
 
+        # ─── 15. Contrato recomendado del flow alert ──────────
+        contract_label = ""
+        if flow_alerts:
+            best = max(flow_alerts, key=lambda f: float(f.get("total_premium", 0)))
+            contract_label = best.get("option_chain", "")
+
         return {
             "ticker":     ticker,
             "score":      score_result.total,
             "tier":       score_result.tier,
-            "direction":  direction.value if direction else "N/A",
-            "icc_phase":  icc_result.phase.value,
-            "icc_signal": icc_result.signal_type,
+            "direction":  direction.value,
+            "icc_phase":  icc_phase.value,
+            "icc_signal": "net_premium_continuation",
             "regime":     regime,
             "session":    session,
             "entry":      round(entry, 2),
             "stop_loss":  round(sl, 2),
             "target1":    round(tp1, 2),
             "target2":    round(tp2, 2),
-            "contract":   contract.get("contract_label", "") if contract else "",
-            "strike":     contract.get("strike") if contract else None,
-            "expiration": contract.get("expiration") if contract else None,
-            "delta":      contract.get("delta") if contract else None,
-            "premium":    contract.get("mid") if contract else None,
+            "contract":   contract_label,
+            "strike":     None,
+            "expiration": None,
+            "delta":      None,
+            "premium":    None,
             "reason":     score_result.reason,
             "score_breakdown": {
                 "icc":      score_result.icc,
@@ -210,30 +255,28 @@ class LivermoreScanner:
                 "pre_post": score_result.pre_post_bonus,
             },
             "channels": score_result.alert_channels,
+            "market_tide": market_tide.get("market_direction") if market_tide else "NEUTRAL",
         }
 
-    def _estimate_adx(self, candles) -> float:
-        if len(candles) < 14:
-            return 15.0
-        ranges = [c.range for c in candles[-14:]]
-        avg_range = sum(ranges) / len(ranges)
-        bodies = [abs(c.close - c.open) for c in candles[-14:]]
-        avg_body = sum(bodies) / len(bodies)
-        ratio = avg_body / avg_range if avg_range > 0 else 0
-        return min(ratio * 50, 50)
-
-    async def _get_watchlist(self) -> list[str]:
+    async def _get_tickers(self) -> list[str]:
         try:
+            # Primero tickers del watchlist de DB
             db = SessionLocal()
             items = db.query(WatchlistItem).filter(WatchlistItem.active == True).all()
             db.close()
             custom = [item.ticker for item in items]
-            return list(set(DEFAULT_WATCHLIST + custom))
         except:
-            return DEFAULT_WATCHLIST
+            custom = []
+
+        # UW screener como fuente principal
+        uw_tickers = await self.uw.get_active_tickers()
+
+        # Merge: custom primero, luego UW screener
+        all_tickers = list(dict.fromkeys(custom + uw_tickers))
+        return all_tickers[:20]
 
     async def _fire_alert(self, result: dict):
-        alert_key = f"{result['ticker']}-{result['score']}-{datetime.now().strftime('%Y%m%d%H')}"
+        alert_key = f"{result['ticker']}-{result['tier']}-{datetime.now(NY_TZ).strftime('%Y%m%d%H')}"
         if alert_key in self.alerts_today:
             return
         self.alerts_today.add(alert_key)
@@ -243,7 +286,7 @@ class LivermoreScanner:
             alert = Alert(
                 ticker=result["ticker"],
                 asset_type="OPTION" if result.get("contract") else "STOCK",
-                mode="SWING" if result.get("contract") else "DAY_TRADE",
+                mode="SWING",
                 score_total=result["score"],
                 score_icc=result["score_breakdown"]["icc"],
                 score_darkpool=result["score_breakdown"]["dark_pool"],
@@ -254,10 +297,6 @@ class LivermoreScanner:
                 target1=result["target1"],
                 target2=result["target2"],
                 contract=result.get("contract", ""),
-                strike=result.get("strike"),
-                expiration=result.get("expiration"),
-                delta=result.get("delta"),
-                premium=result.get("premium"),
                 signal_summary=result["reason"],
                 icc_phase=result["icc_phase"],
                 icc_signal=result["icc_signal"],
@@ -270,9 +309,9 @@ class LivermoreScanner:
             db.commit()
             alert_id = alert.id
             db.close()
-            logger.info(f"Alert saved — {result['ticker']} score={result['score']} tier={result['tier']}")
+            logger.info(f"Alert — {result['ticker']} {result['score']}/100 {result['tier']}")
         except Exception as e:
-            logger.error(f"DB save failed: {e}")
+            logger.error(f"DB error: {e}")
             alert_id = 0
 
         if self.discord:
