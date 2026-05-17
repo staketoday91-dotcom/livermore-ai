@@ -349,5 +349,9 @@ async def main():
     print(f"LOSS: {losses}")
 
 
+async def run_backfill():
+    await main()
+
+
 if __name__ == "__main__":
     asyncio.run(main())

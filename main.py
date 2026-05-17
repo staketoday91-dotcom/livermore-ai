@@ -76,7 +76,33 @@ async def lifespan(app: FastAPI):
     try:
         _ensure_schema()
         Base.metadata.create_all(bind=engine)
-        await _seed_watchlist_if_empty()
+        # Auto-backfill y seed watchlist si DB vacía
+        try:
+            from core.models import Alert, WatchlistItem, SessionLocal as SL
+            _db = SL()
+            backtest_count = _db.query(Alert).filter(Alert.status == "backtest").count()
+            watchlist_count = _db.query(WatchlistItem).count()
+            _db.close()
+            
+            if backtest_count == 0:
+                logger.info("DB vacía — iniciando backfill automático...")
+                from core.backfill import run_backfill
+                asyncio.create_task(run_backfill())
+            
+            if watchlist_count == 0:
+                logger.info("Watchlist vacía — seeding automático...")
+                async def _seed():
+                    from core.uw_fetcher import UWFetcher
+                    uw = UWFetcher()
+                    tickers = await uw.get_active_tickers()
+                    _db2 = SL()
+                    for ticker in tickers[:15]:
+                        _db2.add(WatchlistItem(ticker=ticker, active=True))
+                    _db2.commit()
+                    _db2.close()
+                asyncio.create_task(_seed())
+        except Exception as e:
+            logger.warning(f"Auto-init error: {e}")
         logger.info("Livermore AI started — DB ready")
     except Exception as e:
         logger.error(f"DB init fallo (app sigue arriba para servir /health): {e}")
