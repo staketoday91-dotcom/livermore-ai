@@ -258,6 +258,51 @@ async def dashboard():
             padding: 16px;
         }
 
+        .feed-stack {
+            display: grid;
+            gap: 18px;
+        }
+
+        .backtest-panel {
+            border-color: rgba(96, 165, 250, 0.28);
+            background: linear-gradient(180deg, rgba(8, 18, 38, 0.98), rgba(8, 13, 28, 0.98));
+        }
+
+        .backtest-panel .panel-head {
+            border-bottom-color: rgba(96, 165, 250, 0.22);
+            background: rgba(96, 165, 250, 0.08);
+        }
+
+        .backtest-panel .panel-title {
+            color: #93c5fd;
+        }
+
+        .backtest-copy {
+            padding: 14px 16px 0;
+            color: #b6c8e7;
+            font-size: 13px;
+            line-height: 1.5;
+        }
+
+        .backtests {
+            padding: 16px;
+        }
+
+        .backtest-card {
+            border-color: rgba(96, 165, 250, 0.18);
+            background: rgba(96, 165, 250, 0.045);
+        }
+
+        .backtest-card::before {
+            background: #64748b;
+        }
+
+        .backtest-badge {
+            border-color: rgba(148, 163, 184, 0.32);
+            color: #cbd5e1;
+            background: rgba(100, 116, 139, 0.18);
+        }
+
         .watch-item, .alert-card, .stat-card {
             border: 1px solid rgba(255, 255, 255, 0.07);
             background: rgba(255, 255, 255, 0.025);
@@ -487,13 +532,24 @@ async def dashboard():
                 <div class="watchlist" id="watchlist"></div>
             </section>
 
-            <section class="panel">
-                <div class="panel-head">
-                    <h2 class="panel-title">Feed de Alertas</h2>
-                    <span class="panel-meta">Auto-refresh 30s</span>
-                </div>
-                <div class="alerts" id="alerts"></div>
-            </section>
+            <div class="feed-stack">
+                <section class="panel">
+                    <div class="panel-head">
+                        <h2 class="panel-title">Feed de Alertas</h2>
+                        <span class="panel-meta">Auto-refresh 30s</span>
+                    </div>
+                    <div class="alerts" id="alerts"></div>
+                </section>
+
+                <section class="panel backtest-panel">
+                    <div class="panel-head">
+                        <h2 class="panel-title">BACKTESTING — Últimos 30 Días</h2>
+                        <span class="panel-meta">Histórico</span>
+                    </div>
+                    <div class="backtest-copy">Señales históricas — Lo que el sistema hubiera detectado. No son alertas activas.</div>
+                    <div class="backtests" id="backtests"></div>
+                </section>
+            </div>
 
             <section class="panel">
                 <div class="panel-head">
@@ -515,6 +571,7 @@ async def dashboard():
     <script>
         const els = {
             alerts: document.getElementById("alerts"),
+            backtests: document.getElementById("backtests"),
             stats: document.getElementById("stats"),
             watchlist: document.getElementById("watchlist"),
             watchCount: document.getElementById("watchCount"),
@@ -555,14 +612,14 @@ async def dashboard():
             return response.json();
         }
 
-        function renderAlerts(alerts) {
-            latestAlerts = Array.isArray(alerts) ? alerts : [];
-            if (!latestAlerts.length) {
-                els.alerts.innerHTML = `<div class="empty">No hay alertas activas todavía. El feed se actualizará automáticamente.</div>`;
+        function renderAlertCards(target, alerts, options = {}) {
+            const list = Array.isArray(alerts) ? alerts : [];
+            if (!list.length) {
+                target.innerHTML = `<div class="empty">${escapeHtml(options.empty || "No hay señales para mostrar.")}</div>`;
                 return;
             }
 
-            els.alerts.innerHTML = latestAlerts.map((alert) => {
+            target.innerHTML = list.map((alert) => {
                 const breakdown = alert.score_breakdown || {};
                 const parts = [
                     ["ICC", breakdown.icc],
@@ -572,13 +629,16 @@ async def dashboard():
                 ];
                 const score = scoreValue(alert.score);
                 const contract = alert.contract || [alert.strike, alert.expiration].filter(Boolean).join(" ");
+                const badge = options.backtest ? "BACKTEST" : tierLabel(alert.tier);
+                const cardClass = options.backtest ? "alert-card backtest-card" : "alert-card";
+                const badgeClass = options.backtest ? "tier backtest-badge" : "tier";
                 return `
-                    <article class="alert-card">
+                    <article class="${cardClass}">
                         <div class="alert-top">
                             <div>
                                 <div class="alert-title">
                                     <span class="ticker">${escapeHtml(alert.ticker)}</span>
-                                    <span class="tier">${tierLabel(alert.tier)}</span>
+                                    <span class="${badgeClass}">${badge}</span>
                                     <span class="direction">${escapeHtml(fmt(alert.direction, "SIN DIRECCION"))}</span>
                                 </div>
                             </div>
@@ -600,6 +660,20 @@ async def dashboard():
                     </article>
                 `;
             }).join("");
+        }
+
+        function renderAlerts(alerts) {
+            latestAlerts = Array.isArray(alerts) ? alerts : [];
+            renderAlertCards(els.alerts, latestAlerts, {
+                empty: "No hay alertas activas todavía. El feed se actualizará automáticamente."
+            });
+        }
+
+        function renderBacktests(backtests) {
+            renderAlertCards(els.backtests, backtests, {
+                backtest: true,
+                empty: "No hay señales históricas cargadas todavía. Ejecuta el backfill para poblar esta sección."
+            });
         }
 
         function renderStats(stats) {
@@ -654,17 +728,20 @@ async def dashboard():
 
         async function refreshDashboard() {
             try {
-                const [alerts, stats, watchlist] = await Promise.all([
-                    getJson("/api/alerts"),
+                const [alerts, backtests, stats, watchlist] = await Promise.all([
+                    getJson("/api/alerts?status=pending"),
+                    getJson("/api/backtest"),
                     getJson("/api/stats"),
                     getJson("/api/watchlist")
                 ]);
                 renderAlerts(alerts);
+                renderBacktests(backtests);
                 renderStats(stats);
                 renderWatchlist(watchlist);
                 els.lastUpdate.textContent = "Actualizado";
             } catch (error) {
                 els.alerts.innerHTML = `<div class="empty">Error cargando datos: ${escapeHtml(error.message)}</div>`;
+                els.backtests.innerHTML = `<div class="empty">Error cargando backtesting: ${escapeHtml(error.message)}</div>`;
                 els.lastUpdate.textContent = "Error";
             }
         }
@@ -687,6 +764,38 @@ async def dashboard():
 </body>
 </html>
 """
+
+
+def _serialize_alert(a: Alert) -> dict:
+    return {
+        "id":        a.id,
+        "ticker":    a.ticker,
+        "tier":      a.tier,
+        "score":     a.score_total,
+        "direction": a.icc_phase,
+        "entry":     a.entry_price,
+        "sl":        a.stop_loss,
+        "tp1":       a.target1,
+        "tp2":       a.target2,
+        "contract":  a.contract,
+        "strike":    a.strike,
+        "expiration":a.expiration,
+        "delta":     a.delta,
+        "premium":   a.premium,
+        "signal":    a.signal_summary,
+        "regime":    a.regime,
+        "session":   a.market_session,
+        "status":    a.status,
+        "mode":      a.mode,
+        "pnl":       a.pnl_pct,
+        "score_breakdown": {
+            "icc":       a.score_icc,
+            "dark_pool": a.score_darkpool,
+            "flow":      a.score_flow,
+            "macro":     getattr(a, "score_macro", None) or a.score_regime,
+        },
+        "date": a.created_at.isoformat() if a.created_at else None,
+    }
 
 
 @app.get("/api/stats")
@@ -724,42 +833,31 @@ async def get_alerts(
         q = db.query(Alert).order_by(Alert.created_at.desc())
         if status:
             q = q.filter(Alert.status == status)
+        else:
+            q = q.filter(Alert.status != "backtest")
         if tier:
             try:
                 q = q.filter(Alert.tier == int(tier))
             except ValueError:
                 pass
-        return [{
-            "id":        a.id,
-            "ticker":    a.ticker,
-            "tier":      a.tier,
-            "score":     a.score_total,
-            "direction": a.icc_phase,
-            "entry":     a.entry_price,
-            "sl":        a.stop_loss,
-            "tp1":       a.target1,
-            "tp2":       a.target2,
-            "contract":  a.contract,
-            "strike":    a.strike,
-            "expiration":a.expiration,
-            "delta":     a.delta,
-            "premium":   a.premium,
-            "signal":    a.signal_summary,
-            "regime":    a.regime,
-            "session":   a.market_session,
-            "status":    a.status,
-            "pnl":       a.pnl_pct,
-            "score_breakdown": {
-                "icc":       a.score_icc,
-                "dark_pool": a.score_darkpool,
-                "flow":      a.score_flow,
-                "macro":     getattr(a, "score_macro", None) or a.score_regime,
-            },
-            "date": a.created_at.isoformat() if a.created_at else None,
-        } for a in q.limit(limit).all()]
+        return [_serialize_alert(a) for a in q.limit(limit).all()]
     except Exception as e:
         logger.exception("get_alerts error")
         raise HTTPException(500, f"alerts_error: {type(e).__name__}: {e}")
+
+
+@app.get("/api/backtest")
+async def get_backtest(limit: int = Query(50), db: Session = Depends(get_db)):
+    try:
+        q = (
+            db.query(Alert)
+            .filter(Alert.status == "backtest")
+            .order_by(Alert.created_at.desc())
+        )
+        return [_serialize_alert(a) for a in q.limit(limit).all()]
+    except Exception as e:
+        logger.exception("get_backtest error")
+        raise HTTPException(500, f"backtest_error: {type(e).__name__}: {e}")
 
 
 @app.patch("/api/alerts/{alert_id}")
