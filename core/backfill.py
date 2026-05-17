@@ -15,7 +15,7 @@ sys.path.insert(0, str(ROOT))
 load_dotenv(ROOT / ".env")
 
 from core.models import Alert, Base, engine, SessionLocal  # noqa: E402
-from core.scorer import LivermoreScorer, OptionsFlowSignal, MacroContext  # noqa: E402
+from core.scorer import DarkPoolSignal, LivermoreScorer, OptionsFlowSignal, MacroContext  # noqa: E402
 
 UW_BASE = "https://api.unusualwhales.com/api"
 UW_TOKEN = os.getenv("UNUSUAL_WHALES_TOKEN", "")
@@ -73,6 +73,13 @@ def _contract(data: dict) -> str:
     return " ".join(str(v) for v in (ticker, strike, option_type, expiry) if v)
 
 
+def _alert_date(data: dict) -> str | None:
+    raw = _pick(data, "created_at", "executed_at", "date", default=None)
+    if not raw:
+        return None
+    return str(raw)[:10]
+
+
 def _direction(data: dict) -> str:
     option_type = str(_pick(data, "option_type", "type", "call_put", default="")).lower()
     sentiment = str(_pick(data, "sentiment", "side", "direction", default="")).lower()
@@ -81,7 +88,104 @@ def _direction(data: dict) -> str:
     return "BULLISH"
 
 
-def _score_backtest(data: dict):
+async def fetch_dark_pool(client: httpx.AsyncClient, ticker: str) -> list[dict]:
+    response = await client.get(
+        f"{UW_BASE}/darkpool/{ticker}",
+        headers=_headers(),
+        params={"limit": 20},
+    )
+    if response.status_code != 200:
+        return []
+    payload = response.json()
+    return payload.get("data", payload if isinstance(payload, list) else [])
+
+
+async def fetch_option_historic(client: httpx.AsyncClient, contract: str) -> list[dict]:
+    if not contract:
+        return []
+    response = await client.get(
+        f"{UW_BASE}/option-contract/{contract}/historic",
+        headers=_headers(),
+    )
+    if response.status_code != 200:
+        return []
+    payload = response.json()
+    return payload.get("chains", payload.get("data", payload if isinstance(payload, list) else []))
+
+
+def _price_from_historic(row: dict) -> float:
+    return _float(_pick(row, "last_price", "close", "avg_price", "price", default=0))
+
+
+def _result_from_prices(data: dict, historic: list[dict]) -> tuple[str, float | None]:
+    entry_price = _float(_pick(data, "price", "avg_price", "last_price", default=0))
+    alert_date = _alert_date(data)
+
+    if not entry_price and alert_date:
+        for row in historic:
+            if str(row.get("date", ""))[:10] == alert_date:
+                entry_price = _price_from_historic(row)
+                break
+
+    valid_rows = [row for row in historic if _price_from_historic(row) > 0]
+    if not entry_price or not valid_rows:
+        return "pending", None
+
+    latest = max(valid_rows, key=lambda row: str(_pick(row, "date", "last_tape_time", default="")))
+    current_price = _price_from_historic(latest)
+    pnl_pct = round(((current_price - entry_price) / entry_price) * 100, 2)
+
+    if pnl_pct > 20:
+        return "win", pnl_pct
+    if pnl_pct < -20:
+        return "loss", pnl_pct
+    return "pending", pnl_pct
+
+
+def _dark_pool_signal(rows: list[dict], current_price: float) -> DarkPoolSignal | None:
+    if not rows:
+        return None
+
+    premiums = [_float(_pick(row, "premium", "total_premium", "size", "notional", default=0)) for row in rows]
+    total_premium = sum(premiums)
+    if total_premium <= 0:
+        return None
+
+    largest = max(rows, key=lambda row: _float(_pick(row, "premium", "total_premium", "size", "notional", default=0)))
+    largest_price = _float(_pick(largest, "price", "executed_price", default=current_price), current_price)
+    prices = [_float(_pick(row, "price", "executed_price", default=0)) for row in rows]
+    prices = [price for price in prices if price > 0]
+
+    cluster = False
+    for ref in prices:
+        near = [price for price in prices if abs(price - ref) / ref < 0.005]
+        if len(near) >= 3:
+            cluster = True
+            break
+
+    absorption = False
+    for row in rows[:5]:
+        ask = _float(_pick(row, "nbbo_ask", "ask", default=0))
+        bid = _float(_pick(row, "nbbo_bid", "bid", default=0))
+        premium = _float(_pick(row, "premium", "total_premium", "size", "notional", default=0))
+        if ask > 0 and bid > 0 and premium > 200_000:
+            spread = (ask - bid) / ask
+            if spread < 0.0015:
+                absorption = True
+                break
+
+    return DarkPoolSignal(
+        print_price=largest_price,
+        print_size=total_premium,
+        above_vwap=largest_price >= current_price * 0.995 if current_price else True,
+        cluster=cluster,
+        absorption=absorption,
+        session="BACKTEST",
+        velocity="BURST" if len(rows) >= 3 else "STEADY",
+    )
+
+
+def _score_backtest(data: dict, dark_pool: DarkPoolSignal | None):
     premium = _float(_pick(data, "total_premium", "premium", "ask_side_premium", default=0))
     volume = _int(_pick(data, "volume", "total_volume", default=0))
     open_interest = max(_int(_pick(data, "open_interest", "oi", default=1), 1), 1)
@@ -124,7 +228,7 @@ def _score_backtest(data: dict):
         stop_loss=0,
         target1=0,
         target2=0,
-        dark_pool=None,
+        dark_pool=dark_pool,
         options_flow=options,
         macro=macro,
         adx=25.0,
@@ -160,9 +264,25 @@ async def main():
     Base.metadata.create_all(bind=engine)
     rows = await fetch_flow_alerts()
     loaded = 0
+    max_score = 0
+    dark_pool_cache: dict[str, list[dict]] = {}
+    historic_cache: dict[str, list[dict]] = {}
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        for row in rows:
+            ticker = _ticker(row)
+            if ticker and ticker not in dark_pool_cache:
+                dark_pool_cache[ticker] = await fetch_dark_pool(client, ticker)
+            contract = _contract(row)
+            if contract and contract not in historic_cache:
+                historic_cache[contract] = await fetch_option_historic(client, contract)
 
     db = SessionLocal()
     try:
+        deleted = db.query(Alert).filter(Alert.mode == "BACKTEST").delete(synchronize_session=False)
+        db.commit()
+        print(f"Backtest previo borrado: {deleted} alertas")
+
         for row in rows:
             premium = _float(_pick(row, "total_premium", "premium", "ask_side_premium", default=0))
             if premium <= 100_000:
@@ -172,7 +292,11 @@ async def main():
             if not ticker:
                 continue
 
-            score, premium, direction, options = _score_backtest(row)
+            current_price = _float(_pick(row, "underlying_price", "spot_price", "price", default=0))
+            dark_pool = _dark_pool_signal(dark_pool_cache.get(ticker, []), current_price)
+            score, premium, direction, options = _score_backtest(row, dark_pool)
+            result_status, pnl_pct = _result_from_prices(row, historic_cache.get(options.contract, []))
+            max_score = max(max_score, score.total)
             alert = Alert(
                 ticker=ticker,
                 asset_type="OPTION",
@@ -196,12 +320,17 @@ async def main():
                 volume=options.volume,
                 open_interest=options.open_interest,
                 vol_oi_ratio=options.vol_oi_ratio,
+                dp_print_price=dark_pool.print_price if dark_pool else None,
+                dp_print_size=dark_pool.print_size if dark_pool else None,
+                dp_above_vwap=dark_pool.above_vwap if dark_pool else None,
+                dp_cluster=dark_pool.cluster if dark_pool else None,
                 signal_summary=f"BACKTEST GBDS: {score.reason}",
                 icc_phase=direction,
                 icc_signal="historical_uw_flow_alert",
                 regime="BACKTEST_TRENDING",
                 market_session="BACKTEST",
-                status="backtest",
+                status=result_status,
+                pnl_pct=pnl_pct,
                 created_at=datetime.utcnow(),
                 updated_at=datetime.utcnow(),
             )
@@ -209,10 +338,15 @@ async def main():
             loaded += 1
 
         db.commit()
+        wins = db.query(Alert).filter(Alert.mode == "BACKTEST", Alert.status == "win").count()
+        losses = db.query(Alert).filter(Alert.mode == "BACKTEST", Alert.status == "loss").count()
     finally:
         db.close()
 
     print(f"Backtest cargado: {loaded} alertas")
+    print(f"Score maximo: {max_score}")
+    print(f"WIN: {wins}")
+    print(f"LOSS: {losses}")
 
 
 if __name__ == "__main__":

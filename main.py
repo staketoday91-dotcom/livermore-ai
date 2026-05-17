@@ -1,6 +1,7 @@
 import os
 import logging
 import asyncio
+from html import escape
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Optional
@@ -201,6 +202,25 @@ async def dashboard():
             text-transform: uppercase;
         }
 
+        .header-actions {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .nav-btn {
+            padding: 10px 14px;
+            border: 1px solid rgba(96, 165, 250, 0.38);
+            border-radius: 999px;
+            color: #bfdbfe;
+            background: rgba(96, 165, 250, 0.12);
+            font-size: 13px;
+            font-weight: 800;
+            text-decoration: none;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+        }
+
         .pulse {
             width: 10px;
             height: 10px;
@@ -302,6 +322,27 @@ async def dashboard():
             color: #cbd5e1;
             background: rgba(100, 116, 139, 0.18);
         }
+
+        .result-win {
+            border-color: rgba(39, 209, 127, 0.38);
+            color: var(--green);
+            background: rgba(39, 209, 127, 0.12);
+        }
+
+        .result-loss {
+            border-color: rgba(255, 92, 92, 0.38);
+            color: var(--red);
+            background: rgba(255, 92, 92, 0.12);
+        }
+
+        .pnl {
+            color: var(--muted);
+            font-size: 12px;
+            font-weight: 800;
+        }
+
+        .pnl.win { color: var(--green); }
+        .pnl.loss { color: var(--red); }
 
         .watch-item, .alert-card, .stat-card {
             border: 1px solid rgba(255, 255, 255, 0.07);
@@ -414,6 +455,17 @@ async def dashboard():
             margin-bottom: 10px;
         }
 
+        .copy-btn {
+            margin-left: 8px;
+            border: 1px solid rgba(201, 168, 76, 0.28);
+            border-radius: 8px;
+            background: rgba(201, 168, 76, 0.1);
+            color: var(--gold);
+            cursor: pointer;
+            font-size: 13px;
+            padding: 4px 7px;
+        }
+
         .signal {
             color: var(--muted);
             font-size: 13px;
@@ -520,7 +572,10 @@ async def dashboard():
                     <div class="subtitle">Terminal de tape reading y momentum</div>
                 </div>
             </div>
-            <div class="status"><span class="pulse"></span> Sistema LIVE</div>
+            <div class="header-actions">
+                <a class="nav-btn" href="/backtesting" target="_blank">📊 BACKTESTING</a>
+                <div class="status"><span class="pulse"></span> Sistema LIVE</div>
+            </div>
         </header>
 
         <main>
@@ -532,24 +587,13 @@ async def dashboard():
                 <div class="watchlist" id="watchlist"></div>
             </section>
 
-            <div class="feed-stack">
-                <section class="panel">
-                    <div class="panel-head">
-                        <h2 class="panel-title">Feed de Alertas</h2>
-                        <span class="panel-meta">Auto-refresh 30s</span>
-                    </div>
-                    <div class="alerts" id="alerts"></div>
-                </section>
-
-                <section class="panel backtest-panel">
-                    <div class="panel-head">
-                        <h2 class="panel-title">BACKTESTING — Últimos 30 Días</h2>
-                        <span class="panel-meta">Histórico</span>
-                    </div>
-                    <div class="backtest-copy">Señales históricas — Lo que el sistema hubiera detectado. No son alertas activas.</div>
-                    <div class="backtests" id="backtests"></div>
-                </section>
-            </div>
+            <section class="panel">
+                <div class="panel-head">
+                    <h2 class="panel-title">Feed de Alertas</h2>
+                    <span class="panel-meta">Auto-refresh 30s</span>
+                </div>
+                <div class="alerts" id="alerts"></div>
+            </section>
 
             <section class="panel">
                 <div class="panel-head">
@@ -571,7 +615,6 @@ async def dashboard():
     <script>
         const els = {
             alerts: document.getElementById("alerts"),
-            backtests: document.getElementById("backtests"),
             stats: document.getElementById("stats"),
             watchlist: document.getElementById("watchlist"),
             watchCount: document.getElementById("watchCount"),
@@ -606,6 +649,21 @@ async def dashboard():
             return "ALERT";
         }
 
+        function toIBKR(raw) {
+            const m = String(raw || "").match(/^([A-Z]+)(\d{6})([CP])(\d{8})$/);
+            if (!m) return raw;
+            const strike = (parseInt(m[4]) / 1000).toString();
+            return m[1] + " " + m[2] + m[3] + " " + strike;
+        }
+
+        async function copyIBKR(button) {
+            const text = button.dataset.contract || "";
+            if (!text) return;
+            await navigator.clipboard.writeText(text);
+            button.textContent = "✅";
+            setTimeout(() => { button.textContent = "📋"; }, 1000);
+        }
+
         async function getJson(url) {
             const response = await fetch(url, { cache: "no-store" });
             if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
@@ -629,9 +687,17 @@ async def dashboard():
                 ];
                 const score = scoreValue(alert.score);
                 const contract = alert.contract || [alert.strike, alert.expiration].filter(Boolean).join(" ");
-                const badge = options.backtest ? "BACKTEST" : tierLabel(alert.tier);
+                const ibkrContract = contract ? toIBKR(contract) : "N/A";
+                const copyButton = contract ? `<button class="copy-btn" data-contract="${escapeHtml(ibkrContract)}" onclick="copyIBKR(this)" title="Copiar contrato IBKR">📋</button>` : "";
+                const status = String(alert.status || "").toLowerCase();
+                const badge = options.backtest ? (status === "win" ? "WIN" : status === "loss" ? "LOSS" : "PENDING") : tierLabel(alert.tier);
                 const cardClass = options.backtest ? "alert-card backtest-card" : "alert-card";
-                const badgeClass = options.backtest ? "tier backtest-badge" : "tier";
+                const badgeClass = options.backtest
+                    ? `tier backtest-badge ${status === "win" ? "result-win" : status === "loss" ? "result-loss" : ""}`
+                    : "tier";
+                const pnl = Number(alert.pnl);
+                const pnlClass = Number.isFinite(pnl) && pnl > 0 ? "win" : Number.isFinite(pnl) && pnl < 0 ? "loss" : "";
+                const pnlText = options.backtest && Number.isFinite(pnl) ? `<span class="pnl ${pnlClass}">${pnl > 0 ? "+" : ""}${pnl.toFixed(2)}%</span>` : "";
                 return `
                     <article class="${cardClass}">
                         <div class="alert-top">
@@ -640,11 +706,12 @@ async def dashboard():
                                     <span class="ticker">${escapeHtml(alert.ticker)}</span>
                                     <span class="${badgeClass}">${badge}</span>
                                     <span class="direction">${escapeHtml(fmt(alert.direction, "SIN DIRECCION"))}</span>
+                                    ${pnlText}
                                 </div>
                             </div>
                             <div class="score-big">${score}<span>/100</span></div>
                         </div>
-                        <div class="contract">Contrato: ${escapeHtml(fmt(contract, "N/A"))}</div>
+                        <div class="contract">Contrato: ${escapeHtml(fmt(ibkrContract, "N/A"))}${copyButton}</div>
                         <div class="signal">${escapeHtml(fmt(alert.signal, "Sin tesis registrada."))}</div>
                         <div class="breakdown">
                             ${parts.map(([label, value]) => {
@@ -666,13 +733,6 @@ async def dashboard():
             latestAlerts = Array.isArray(alerts) ? alerts : [];
             renderAlertCards(els.alerts, latestAlerts, {
                 empty: "No hay alertas activas todavía. El feed se actualizará automáticamente."
-            });
-        }
-
-        function renderBacktests(backtests) {
-            renderAlertCards(els.backtests, backtests, {
-                backtest: true,
-                empty: "No hay señales históricas cargadas todavía. Ejecuta el backfill para poblar esta sección."
             });
         }
 
@@ -728,20 +788,17 @@ async def dashboard():
 
         async function refreshDashboard() {
             try {
-                const [alerts, backtests, stats, watchlist] = await Promise.all([
+                const [alerts, stats, watchlist] = await Promise.all([
                     getJson("/api/alerts?status=pending"),
-                    getJson("/api/backtest"),
                     getJson("/api/stats"),
                     getJson("/api/watchlist")
                 ]);
                 renderAlerts(alerts);
-                renderBacktests(backtests);
                 renderStats(stats);
                 renderWatchlist(watchlist);
                 els.lastUpdate.textContent = "Actualizado";
             } catch (error) {
                 els.alerts.innerHTML = `<div class="empty">Error cargando datos: ${escapeHtml(error.message)}</div>`;
-                els.backtests.innerHTML = `<div class="empty">Error cargando backtesting: ${escapeHtml(error.message)}</div>`;
                 els.lastUpdate.textContent = "Error";
             }
         }
@@ -760,6 +817,155 @@ async def dashboard():
         refreshDashboard();
         setInterval(updateClock, 1000);
         setInterval(refreshDashboard, 30000);
+    </script>
+</body>
+</html>
+"""
+
+
+def _format_et(dt: Optional[datetime]) -> str:
+    if not dt:
+        return "--"
+    if dt.tzinfo is None:
+        dt = pytz.utc.localize(dt)
+    et = dt.astimezone(pytz.timezone("America/New_York"))
+    return f"{et.strftime('%b')} {et.day}, {et.year} — {et.strftime('%I:%M %p').lstrip('0')} ET"
+
+
+@app.get("/backtesting", response_class=HTMLResponse)
+async def backtesting_page(db: Session = Depends(get_db)):
+    alerts = (
+        db.query(Alert)
+        .filter(Alert.mode == "BACKTEST")
+        .order_by(Alert.created_at.desc())
+        .all()
+    )
+    total = len(alerts)
+    wins = sum(1 for a in alerts if a.status == "win")
+    losses = sum(1 for a in alerts if a.status == "loss")
+    closed = wins + losses
+    win_rate = round(wins / closed * 100, 1) if closed else 0
+    pnl_values = [a.pnl_pct for a in alerts if a.pnl_pct is not None]
+    avg_pnl = round(sum(pnl_values) / len(pnl_values), 2) if pnl_values else 0
+
+    rows = "\n".join(
+        f"""
+        <tr>
+            <td>{escape(_format_et(a.created_at))}</td>
+            <td class="ticker">{escape(a.ticker or "--")}</td>
+            <td>
+                <span class="ibkr-contract" data-raw="{escape(a.contract or '', quote=True)}">{escape(a.contract or "--")}</span>
+                <button class="copy-btn" data-contract="" onclick="copyIBKR(this)" title="Copiar contrato IBKR">📋</button>
+            </td>
+            <td>{a.score_total or 0}/100</td>
+            <td>{escape(a.icc_phase or "--")}</td>
+            <td class="pnl {'win' if (a.pnl_pct or 0) > 0 else 'loss' if (a.pnl_pct or 0) < 0 else ''}">{'+' if (a.pnl_pct or 0) > 0 else ''}{round(a.pnl_pct, 2) if a.pnl_pct is not None else '--'}{'%' if a.pnl_pct is not None else ''}</td>
+            <td><span class="badge {escape(a.status or 'pending')}">{escape((a.status or 'pending').upper())}</span></td>
+        </tr>
+        """
+        for a in alerts
+    )
+
+    return """
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>LIVERMORE AI — BACKTESTING</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg:#0a0a0a; --panel:#101827; --line:rgba(96,165,250,.25);
+            --blue:#93c5fd; --text:#f2f2f2; --muted:#8fa3bf; --green:#27d17f; --red:#ff5c5c; --gold:#c9a84c;
+        }
+        * { box-sizing:border-box; }
+        body {
+            margin:0; min-height:100vh; color:var(--text);
+            font-family:"Inter",system-ui,sans-serif;
+            background:radial-gradient(circle at 15% 0%,rgba(96,165,250,.18),transparent 32%), var(--bg);
+            padding:22px;
+        }
+        header {
+            display:flex; justify-content:space-between; align-items:center; gap:16px;
+            border:1px solid var(--line); border-radius:18px; padding:18px 22px;
+            background:linear-gradient(135deg,rgba(15,23,42,.98),rgba(8,13,28,.98));
+            box-shadow:0 24px 80px rgba(0,0,0,.45);
+        }
+        h1 { margin:0; color:var(--blue); font-size:clamp(28px,3vw,40px); font-weight:800; }
+        .back { color:var(--gold); text-decoration:none; font-weight:800; border:1px solid rgba(201,168,76,.28); border-radius:999px; padding:10px 14px; background:rgba(201,168,76,.1); }
+        .stats { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; margin:18px 0; }
+        .stat { border:1px solid var(--line); border-radius:16px; padding:16px; background:rgba(15,23,42,.88); }
+        .label { color:var(--muted); font-size:12px; font-weight:800; text-transform:uppercase; letter-spacing:.12em; }
+        .value { margin-top:6px; font-size:30px; font-weight:800; }
+        .panel { border:1px solid var(--line); border-radius:18px; overflow:hidden; background:rgba(8,13,28,.96); }
+        .panel-head { padding:16px 18px; color:#bfdbfe; background:rgba(96,165,250,.08); border-bottom:1px solid var(--line); font-weight:800; }
+        table { width:100%; border-collapse:collapse; }
+        th,td { padding:13px 14px; border-bottom:1px solid rgba(255,255,255,.06); text-align:left; font-size:13px; }
+        th { color:var(--muted); text-transform:uppercase; letter-spacing:.1em; font-size:11px; }
+        .ticker { color:#fff; font-weight:800; }
+        .pnl { font-weight:800; color:var(--muted); }
+        .pnl.win { color:var(--green); }
+        .pnl.loss { color:var(--red); }
+        .badge { display:inline-block; padding:5px 9px; border-radius:999px; font-size:11px; font-weight:800; background:rgba(148,163,184,.16); color:#cbd5e1; }
+        .badge.win { color:var(--green); background:rgba(39,209,127,.12); }
+        .badge.loss { color:var(--red); background:rgba(255,92,92,.12); }
+        .copy-btn { margin-left:8px; border:1px solid rgba(96,165,250,.3); border-radius:8px; background:rgba(96,165,250,.12); color:var(--blue); cursor:pointer; font-size:13px; padding:4px 7px; }
+        @media (max-width:900px) { .stats { grid-template-columns:1fr; } header { flex-direction:column; align-items:flex-start; } table { min-width:900px; } .panel { overflow:auto; } }
+    </style>
+</head>
+<body>
+    <header>
+        <div>
+            <h1>LIVERMORE AI — BACKTESTING</h1>
+            <div class="label">Señales históricas separadas de alertas activas</div>
+        </div>
+        <a class="back" href="/">← Volver al Dashboard</a>
+    </header>
+    <section class="stats">
+        <div class="stat"><div class="label">Total Backtested</div><div class="value">""" + str(total) + """</div></div>
+        <div class="stat"><div class="label">Win Rate</div><div class="value">""" + str(win_rate) + """%</div></div>
+        <div class="stat"><div class="label">P&L Promedio</div><div class="value">""" + ("+" if avg_pnl > 0 else "") + str(avg_pnl) + """%</div></div>
+    </section>
+    <section class="panel">
+        <div class="panel-head">Alertas históricas</div>
+        <table>
+            <thead>
+                <tr>
+                    <th>Fecha Entrada</th><th>Ticker</th><th>Contrato</th><th>Score</th><th>Dirección</th><th>P&L%</th><th>Status</th>
+                </tr>
+            </thead>
+            <tbody>""" + (rows or '<tr><td colspan="7">No hay backtests cargados.</td></tr>') + """</tbody>
+        </table>
+    </section>
+    <script>
+        function toIBKR(raw) {
+            const m = String(raw || "").match(/^([A-Z]+)(\d{6})([CP])(\d{8})$/);
+            if (!m) return raw;
+            const strike = (parseInt(m[4]) / 1000).toString();
+            return m[1] + " " + m[2] + m[3] + " " + strike;
+        }
+
+        async function copyIBKR(button) {
+            const text = button.dataset.contract || "";
+            if (!text) return;
+            await navigator.clipboard.writeText(text);
+            button.textContent = "✅";
+            setTimeout(() => { button.textContent = "📋"; }, 1000);
+        }
+
+        document.querySelectorAll(".ibkr-contract").forEach((el) => {
+            const raw = el.dataset.raw || el.textContent;
+            const ibkr = toIBKR(raw);
+            el.textContent = ibkr || "--";
+            const button = el.parentElement.querySelector(".copy-btn");
+            if (button) {
+                button.dataset.contract = ibkr;
+                if (!ibkr || ibkr === "--") button.style.display = "none";
+            }
+        });
     </script>
 </body>
 </html>
@@ -801,12 +1007,13 @@ def _serialize_alert(a: Alert) -> dict:
 @app.get("/api/stats")
 async def get_stats(db: Session = Depends(get_db)):
     try:
-        total  = db.query(Alert).count()
-        wins   = db.query(Alert).filter(Alert.status == "win").count()
-        losses = db.query(Alert).filter(Alert.status == "loss").count()
+        active = db.query(Alert).filter(Alert.mode != "BACKTEST")
+        total  = active.count()
+        wins   = active.filter(Alert.status == "win").count()
+        losses = active.filter(Alert.status == "loss").count()
         closed = wins + losses
         today  = datetime.utcnow().date()
-        today_alerts = db.query(Alert).filter(
+        today_alerts = active.filter(
             Alert.created_at >= datetime(today.year, today.month, today.day)
         ).count()
         return {
@@ -814,7 +1021,7 @@ async def get_stats(db: Session = Depends(get_db)):
             "today":    today_alerts,
             "wins":     wins,
             "losses":   losses,
-            "open":     db.query(Alert).filter(Alert.status == "pending").count(),
+            "open":     active.filter(Alert.status == "pending").count(),
             "win_rate": round(wins / closed * 100, 1) if closed > 0 else 0,
         }
     except Exception as e:
@@ -830,11 +1037,14 @@ async def get_alerts(
     db: Session = Depends(get_db)
 ):
     try:
-        q = db.query(Alert).order_by(Alert.created_at.desc())
+        q = (
+            db.query(Alert)
+            .filter(Alert.status != "backtest")
+            .filter(Alert.mode != "BACKTEST")
+            .order_by(Alert.created_at.desc())
+        )
         if status:
             q = q.filter(Alert.status == status)
-        else:
-            q = q.filter(Alert.status != "backtest")
         if tier:
             try:
                 q = q.filter(Alert.tier == int(tier))
@@ -851,7 +1061,7 @@ async def get_backtest(limit: int = Query(50), db: Session = Depends(get_db)):
     try:
         q = (
             db.query(Alert)
-            .filter(Alert.status == "backtest")
+            .filter(Alert.mode == "BACKTEST")
             .order_by(Alert.created_at.desc())
         )
         return [_serialize_alert(a) for a in q.limit(limit).all()]
