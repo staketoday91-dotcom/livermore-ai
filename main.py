@@ -22,6 +22,27 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("livermore")
 
 
+async def _seed_watchlist_if_empty():
+    db = None
+    try:
+        db = SessionLocal()
+        count = db.query(WatchlistItem).count()
+        if count == 0:
+            from core.uw_fetcher import UWFetcher
+            uw = UWFetcher()
+            tickers = await uw.get_active_tickers()
+            for ticker in tickers[:15]:
+                item = WatchlistItem(ticker=ticker.upper(), active=True)
+                db.add(item)
+            db.commit()
+            logger.info(f"Watchlist seeded with {min(len(tickers), 15)} UW tickers")
+    except Exception as e:
+        logger.warning(f"Watchlist seed error: {e}")
+    finally:
+        if db:
+            db.close()
+
+
 def _ensure_schema():
     """
     Self-healing migration: si la tabla 'alerts' existe con un esquema viejo
@@ -55,6 +76,7 @@ async def lifespan(app: FastAPI):
     try:
         _ensure_schema()
         Base.metadata.create_all(bind=engine)
+        await _seed_watchlist_if_empty()
         logger.info("Livermore AI started — DB ready")
     except Exception as e:
         logger.error(f"DB init fallo (app sigue arriba para servir /health): {e}")
@@ -574,6 +596,8 @@ async def dashboard():
             </div>
             <div class="header-actions">
                 <a class="nav-btn" href="/backtesting" target="_blank">📊 BACKTESTING</a>
+                <a class="nav-btn" href="/alerts">🔔 ALERTAS</a>
+                <a class="nav-btn" href="/watchlist">👁 WATCHLIST</a>
                 <div class="status"><span class="pulse"></span> Sistema LIVE</div>
             </div>
         </header>
@@ -650,7 +674,7 @@ async def dashboard():
         }
 
         function toIBKR(raw) {
-            const m = String(raw || "").match(/^([A-Z]+)(\d{6})([CP])(\d{8})$/);
+            const m = String(raw || "").match(/^([A-Z]+)(\\d{6})([CP])(\\d{8})$/);
             if (!m) return raw;
             const strike = (parseInt(m[4]) / 1000).toString();
             return m[1] + " " + m[2] + m[3] + " " + strike;
@@ -823,6 +847,318 @@ async def dashboard():
 """
 
 
+def _replace_root_dashboard_route():
+    app.router.routes = [
+        route for route in app.router.routes
+        if not (
+            getattr(route, "path", None) == "/"
+            and "GET" in getattr(route, "methods", set())
+        )
+    ]
+
+
+_replace_root_dashboard_route()
+
+
+@app.get("/", response_class=HTMLResponse)
+async def professional_dashboard():
+    return """
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>LIVERMORE AI | Professional Trading Terminal</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg:#0a0a0a; --panel:#101010; --panel2:#171717; --line:rgba(201,168,76,.22);
+            --gold:#c9a84c; --amber:#E8921A; --red-brand:#c0392b; --text:#f2f2f2;
+            --muted:#9a9a9a; --muted2:#656565; --green:#27d17f; --red:#ff5c5c; --shadow:rgba(0,0,0,.45);
+        }
+        body.light {
+            --bg:#f5f0e8; --panel:#fffaf1; --panel2:#f0e6d5; --line:rgba(91,70,23,.22);
+            --text:#18140d; --muted:#6d604d; --muted2:#8d806b; --shadow:rgba(72,52,16,.14);
+        }
+        * { box-sizing:border-box; }
+        body {
+            margin:0; min-height:100vh; color:var(--text); font-family:"Inter",system-ui,sans-serif;
+            background:radial-gradient(circle at 12% -8%,rgba(201,168,76,.18),transparent 30%),
+                       radial-gradient(circle at 95% 0%,rgba(232,146,26,.10),transparent 24%), var(--bg);
+            letter-spacing:-.01em;
+        }
+        .terminal { min-height:100vh; display:grid; grid-template-rows:auto 1fr auto; gap:14px; padding:16px; }
+        header {
+            display:grid; grid-template-columns:auto 1fr auto; gap:20px; align-items:center;
+            border:1px solid var(--line); border-radius:16px; padding:16px 18px;
+            background:linear-gradient(135deg,var(--panel),rgba(10,10,10,.92)); box-shadow:0 20px 70px var(--shadow);
+        }
+        body.light header { background:linear-gradient(135deg,var(--panel),#f5f0e8); }
+        .brand { display:flex; align-items:center; gap:16px; }
+        .mark {
+            width:46px; height:46px; display:grid; place-items:center; border:1px solid rgba(201,168,76,.72);
+            border-radius:14px; color:var(--gold); background:rgba(201,168,76,.12); font-weight:800; letter-spacing:.08em;
+        }
+        h1 { margin:0; color:var(--gold); font-size:clamp(24px,2.4vw,36px); line-height:1; font-weight:800; }
+        .subtitle { margin-top:6px; color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.18em; }
+        nav, .header-actions { display:flex; align-items:center; gap:10px; }
+        nav { justify-content:center; }
+        .nav-btn, .theme-toggle {
+            border:1px solid var(--line); border-radius:999px; background:rgba(201,168,76,.08); color:var(--gold);
+            cursor:pointer; font-size:12px; font-weight:800; letter-spacing:.1em; padding:10px 13px; text-decoration:none; text-transform:uppercase;
+        }
+        .status {
+            display:flex; align-items:center; gap:9px; padding:10px 14px; border:1px solid rgba(39,209,127,.28);
+            border-radius:999px; background:rgba(39,209,127,.09); color:var(--green); font-size:12px; font-weight:800; text-transform:uppercase;
+        }
+        .pulse { width:10px; height:10px; border-radius:50%; background:var(--green); box-shadow:0 0 0 0 rgba(39,209,127,.8); animation:pulse 1.8s infinite; }
+        @keyframes pulse { 70% { box-shadow:0 0 0 12px rgba(39,209,127,0); } 100% { box-shadow:0 0 0 0 rgba(39,209,127,0); } }
+        main { display:grid; grid-template-columns:minmax(260px,.86fr) minmax(460px,1.58fr) minmax(290px,.96fr); gap:14px; min-height:0; }
+        .panel {
+            min-height:0; border:1px solid var(--line); border-radius:16px; overflow:hidden;
+            background:linear-gradient(180deg,var(--panel),rgba(12,12,12,.98)); box-shadow:0 18px 50px var(--shadow);
+        }
+        body.light .panel { background:linear-gradient(180deg,var(--panel),#f5f0e8); }
+        .panel-head { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:15px 16px; border-bottom:1px solid var(--line); background:rgba(201,168,76,.06); }
+        .panel-title { margin:0; color:var(--gold); font-size:13px; font-weight:800; text-transform:uppercase; letter-spacing:.16em; }
+        .panel-meta { color:var(--muted); font-size:12px; font-weight:700; white-space:nowrap; }
+        .watchlist, .alerts, .stats { padding:16px; }
+        .watchlist, .alerts { max-height:calc(100vh - 192px); overflow:auto; }
+        .watch-item, .alert-card, .stat-card, .market-card {
+            border:1px solid rgba(255,255,255,.07); border-radius:14px; background:rgba(255,255,255,.028);
+        }
+        body.light .watch-item, body.light .alert-card, body.light .stat-card, body.light .market-card { border-color:rgba(91,70,23,.14); background:rgba(255,255,255,.52); }
+        .watch-item { display:grid; gap:10px; margin-bottom:10px; padding:12px; cursor:pointer; transition:.15s ease; }
+        .watch-item:hover, .watch-item.active { border-color:rgba(201,168,76,.5); background:rgba(201,168,76,.08); transform:translateY(-1px); }
+        .watch-top, .watch-price-row, .alert-top, .contract-row, .footer-row { display:flex; align-items:center; justify-content:space-between; gap:10px; }
+        .ticker { color:var(--text); font-size:19px; font-weight:800; letter-spacing:.02em; }
+        .price { color:var(--text); font-size:16px; font-weight:800; font-variant-numeric:tabular-nums; }
+        .change, .direction { font-size:12px; font-weight:800; text-transform:uppercase; }
+        .positive, .bullish { color:var(--green); } .negative, .bearish { color:var(--red); } .neutral { color:var(--gold); }
+        .phase, .tier {
+            display:inline-flex; align-items:center; border:1px solid var(--line); border-radius:999px; padding:5px 8px;
+            font-size:10px; font-weight:800; letter-spacing:.08em; text-transform:uppercase;
+        }
+        .phase.indication { color:#f1c40f; background:rgba(241,196,15,.12); border-color:rgba(241,196,15,.3); }
+        .phase.correction { color:var(--amber); background:rgba(232,146,26,.14); border-color:rgba(232,146,26,.36); }
+        .phase.continuation { color:var(--green); background:rgba(39,209,127,.11); border-color:rgba(39,209,127,.32); }
+        .tier.alert { color:var(--green); background:rgba(39,209,127,.11); border-color:rgba(39,209,127,.32); }
+        .tier.premium { color:var(--amber); background:rgba(232,146,26,.14); border-color:rgba(232,146,26,.36); }
+        .tier.livermore { color:var(--gold); background:rgba(201,168,76,.14); border-color:rgba(201,168,76,.42); }
+        .score-line { display:grid; grid-template-columns:1fr auto; gap:10px; align-items:center; }
+        .score-label { color:var(--muted); font-size:11px; font-weight:800; letter-spacing:.08em; text-transform:uppercase; }
+        .score-num { color:var(--gold); font-size:13px; font-weight:800; font-variant-numeric:tabular-nums; }
+        .progress, .bar { height:7px; border-radius:999px; background:rgba(255,255,255,.08); overflow:hidden; }
+        body.light .progress, body.light .bar { background:rgba(91,70,23,.12); }
+        .progress-fill, .bar-fill { height:100%; width:0%; border-radius:inherit; background:linear-gradient(90deg,var(--red-brand),var(--amber),var(--gold)); }
+        .alert-filter {
+            display:none; align-items:center; justify-content:space-between; gap:10px; margin-bottom:14px; border:1px solid rgba(201,168,76,.22);
+            border-radius:12px; background:rgba(201,168,76,.07); color:var(--muted); padding:10px 12px; font-size:12px; font-weight:700;
+        }
+        .alert-filter.show { display:flex; }
+        .clear-filter { border:0; background:transparent; color:var(--gold); cursor:pointer; font-weight:800; }
+        .alert-card { margin-bottom:14px; padding:16px; position:relative; overflow:hidden; }
+        .alert-card::before { content:""; position:absolute; inset:0 auto 0 0; width:3px; background:var(--gold); }
+        .alert-title { display:flex; flex-wrap:wrap; align-items:center; gap:9px; }
+        .score-big { color:var(--gold); font-size:32px; font-weight:800; line-height:1; text-align:right; font-variant-numeric:tabular-nums; }
+        .score-big span { color:var(--muted); font-size:12px; }
+        .direction-line { margin:12px 0; display:flex; align-items:center; gap:10px; font-size:14px; font-weight:800; letter-spacing:.08em; text-transform:uppercase; }
+        .direction-arrow { font-size:24px; line-height:1; }
+        .contract-row { border:1px solid rgba(201,168,76,.16); border-radius:12px; background:rgba(201,168,76,.055); padding:10px 11px; margin-bottom:12px; }
+        .contract { color:var(--text); font-size:13px; font-weight:800; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .copy-btn { border:1px solid rgba(201,168,76,.32); border-radius:8px; background:rgba(201,168,76,.1); color:var(--gold); cursor:pointer; font-size:12px; font-weight:800; padding:5px 8px; }
+        .levels { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:9px; margin-bottom:13px; }
+        .level { border:1px solid rgba(255,255,255,.06); border-radius:12px; background:rgba(255,255,255,.025); padding:10px; }
+        .level-label { color:var(--muted); font-size:10px; font-weight:800; letter-spacing:.1em; text-transform:uppercase; }
+        .level-value { margin-top:4px; color:var(--text); font-size:16px; font-weight:800; font-variant-numeric:tabular-nums; }
+        .breakdown { display:grid; gap:9px; margin-bottom:12px; }
+        .break-label { display:flex; justify-content:space-between; color:var(--muted); font-size:11px; font-weight:800; text-transform:uppercase; margin-bottom:5px; }
+        .signals { color:var(--muted); font-size:12px; line-height:1.45; margin-bottom:10px; }
+        .timestamp { color:var(--muted2); font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.08em; }
+        .stats-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:11px; margin-bottom:14px; }
+        .stat-card { padding:13px; }
+        .stat-label { color:var(--muted); font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; }
+        .stat-value { margin-top:7px; color:var(--text); font-size:28px; font-weight:800; font-variant-numeric:tabular-nums; }
+        .market-card { padding:16px; margin-bottom:14px; }
+        .tide-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px; }
+        .tide-arrow { font-size:48px; line-height:1; }
+        .tide-value { font-size:24px; font-weight:800; text-transform:uppercase; }
+        .context-row { display:flex; justify-content:space-between; gap:10px; padding:9px 0; border-top:1px solid rgba(255,255,255,.06); color:var(--muted); font-size:12px; }
+        .context-row strong { color:var(--text); font-weight:800; text-align:right; }
+        .empty { padding:28px 18px; color:var(--muted); text-align:center; border:1px dashed rgba(201,168,76,.25); border-radius:14px; background:rgba(201,168,76,.04); }
+        footer { display:flex; justify-content:space-between; align-items:center; gap:16px; color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.12em; padding:0 4px; }
+        footer strong { color:var(--gold); }
+        @media (max-width:1180px) {
+            main { grid-template-columns:1fr; } header { grid-template-columns:1fr; align-items:flex-start; }
+            nav, .header-actions { justify-content:flex-start; flex-wrap:wrap; } .watchlist, .alerts { max-height:none; }
+        }
+        @media (max-width:640px) {
+            .terminal { padding:10px; } .stats-grid, .levels { grid-template-columns:1fr; }
+            footer, .panel-head, .alert-top, .watch-price-row { align-items:flex-start; flex-direction:column; }
+        }
+    </style>
+</head>
+<body>
+    <div class="terminal">
+        <header>
+            <div class="brand">
+                <div class="mark">LA</div>
+                <div><h1>LIVERMORE AI</h1><div class="subtitle">Institutional flow intelligence terminal</div></div>
+            </div>
+            <nav>
+                <a class="nav-btn" href="/backtesting">BACKTESTING</a>
+                <a class="nav-btn" href="/alerts">ALERTAS</a>
+                <a class="nav-btn" href="/watchlist">WATCHLIST</a>
+            </nav>
+            <div class="header-actions">
+                <button class="theme-toggle" id="themeToggle" type="button">Modo día</button>
+                <div class="status"><span class="pulse"></span> Sistema LIVE</div>
+            </div>
+        </header>
+
+        <main>
+            <section class="panel">
+                <div class="panel-head"><h2 class="panel-title">Watchlist</h2><span class="panel-meta" id="watchCount">0 activos</span></div>
+                <div class="watchlist" id="watchlist"></div>
+            </section>
+
+            <section class="panel">
+                <div class="panel-head"><h2 class="panel-title">Feed de Alertas</h2><span class="panel-meta"><strong id="todayCount">0</strong> hoy · Auto-refresh 30s</span></div>
+                <div class="alerts">
+                    <div class="alert-filter" id="alertFilter"><span>Filtrando por <strong id="filterTicker"></strong></span><button class="clear-filter" type="button" id="clearFilter">LIMPIAR</button></div>
+                    <div id="alerts"></div>
+                </div>
+            </section>
+
+            <section class="panel">
+                <div class="panel-head"><h2 class="panel-title">Stats + Market Context</h2><span class="panel-meta" id="lastUpdate">Sin datos</span></div>
+                <div class="stats"><div id="marketContext"></div><div class="stats-grid" id="stats"></div></div>
+            </section>
+        </main>
+
+        <footer>
+            <span><strong>LIVERMORE AI TRADING TERMINAL</strong></span>
+            <span>Último scan: <strong id="lastScan">--</strong> · Hora ET: <strong id="etClock">--:--:--</strong></span>
+        </footer>
+    </div>
+
+    <script>
+        const els = {
+            alerts: document.getElementById("alerts"), alertFilter: document.getElementById("alertFilter"),
+            clearFilter: document.getElementById("clearFilter"), filterTicker: document.getElementById("filterTicker"),
+            marketContext: document.getElementById("marketContext"), stats: document.getElementById("stats"),
+            themeToggle: document.getElementById("themeToggle"), todayCount: document.getElementById("todayCount"),
+            watchlist: document.getElementById("watchlist"), watchCount: document.getElementById("watchCount"),
+            lastUpdate: document.getElementById("lastUpdate"), lastScan: document.getElementById("lastScan"), etClock: document.getElementById("etClock")
+        };
+        let latestAlerts = [], latestWatchlist = [], currentFilter = null, lastScanDate = null;
+        function escapeHtml(value) { return String(value ?? "").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;").replaceAll("'","&#039;"); }
+        function fmt(value, fallback = "--") { return value === null || value === undefined || value === "" ? fallback : value; }
+        function money(value) { const n = Number(value); return Number.isFinite(n) && n > 0 ? "$" + n.toFixed(2) : "--"; }
+        function pct(value) { const n = Number(value); return Number.isFinite(n) ? `${n >= 0 ? "+" : ""}${n.toFixed(2)}%` : "--"; }
+        function scoreValue(value) { const score = Number(value ?? 0); return Number.isFinite(score) ? Math.max(0, Math.min(100, score)) : 0; }
+        function tierLabel(tier) { const value = Number(tier ?? 1); if (value >= 3) return "LIVERMORE"; if (value === 2) return "PREMIUM"; return "ALERT"; }
+        function tierClass(tier) { return tierLabel(tier).toLowerCase(); }
+        function phaseLabel(phase) { const p = String(phase || "INDICATION").toUpperCase(); if (p.includes("CORRECTION")) return "CORRECTION"; if (p.includes("CONTINUATION")) return "CONTINUATION"; return "INDICATION"; }
+        function directionLabel(alert) {
+            const d = String(alert.direction || "").toUpperCase();
+            if (d.includes("BEAR")) return "BEARISH"; if (d.includes("BULL")) return "BULLISH";
+            const entry = Number(alert.entry), tp1 = Number(alert.tp1);
+            return Number.isFinite(entry) && Number.isFinite(tp1) && tp1 < entry ? "BEARISH" : "BULLISH";
+        }
+        function toIBKR(raw) { const m = String(raw || "").match(/^([A-Z]+)(\\d{6})([CP])(\\d{8})$/); if (!m) return raw || ""; return m[1] + " " + m[2] + m[3] + " " + (parseInt(m[4]) / 1000).toString(); }
+        async function copyIBKR(button) { const text = button.dataset.contract || ""; if (!text) return; await navigator.clipboard.writeText(text); button.textContent = "COPIADO"; setTimeout(() => { button.textContent = "COPIAR"; }, 1000); }
+        async function getJson(url) { const response = await fetch(url, { cache:"no-store" }); if (!response.ok) throw new Error(`${response.status} ${response.statusText}`); return response.json(); }
+        function minutesAgo(value) {
+            if (!value) return "sin timestamp"; const date = new Date(value); if (Number.isNaN(date.getTime())) return "sin timestamp";
+            const mins = Math.max(0, Math.round((Date.now() - date.getTime()) / 60000));
+            if (mins < 1) return "hace segundos"; if (mins < 60) return `hace ${mins} minutos`;
+            const hours = Math.round(mins / 60); if (hours < 24) return `hace ${hours} horas`; return `hace ${Math.round(hours / 24)} días`;
+        }
+        function institutionalWindow() {
+            const parts = new Intl.DateTimeFormat("en-US", { timeZone:"America/New_York", hour:"numeric", minute:"numeric", hour12:false }).formatToParts(new Date());
+            const total = Number(parts.find((p) => p.type === "hour")?.value || 0) * 60 + Number(parts.find((p) => p.type === "minute")?.value || 0);
+            if (total < 570) return "PRE-MARKET"; if (total < 660) return "ACCUMULATION-MORNING"; if (total < 840) return "QUIET";
+            if (total < 960) return "ACCUMULATION-AFTERNOON"; return "POST-MARKET";
+        }
+        function renderAlerts() {
+            const list = currentFilter ? latestAlerts.filter((a) => String(a.ticker || "").toUpperCase() === currentFilter) : latestAlerts;
+            els.alertFilter.classList.toggle("show", Boolean(currentFilter)); els.filterTicker.textContent = currentFilter || "";
+            if (!list.length) {
+                els.alerts.innerHTML = `<div class="empty">"No es el pensar lo que hace dinero, sino el sentarse." Jesse Livermore<br><br>Sin alertas activas por ahora. El tape está respirando.</div>`;
+                return;
+            }
+            els.alerts.innerHTML = list.map((alert) => {
+                const b = alert.score_breakdown || {};
+                const parts = [["ICC", b.icc], ["Dark Pool", b.dark_pool], ["Flow", b.flow], ["Macro", b.macro]];
+                const score = scoreValue(alert.score), contract = alert.contract || [alert.strike, alert.expiration].filter(Boolean).join(" ");
+                const ibkr = contract ? toIBKR(contract) : "N/A", direction = directionLabel(alert), dirClass = direction === "BEARISH" ? "bearish" : "bullish";
+                const signals = [alert.icc_phase ? `ICC ${alert.icc_phase}` : null, alert.regime, alert.session, alert.signal].filter(Boolean).join(" · ");
+                return `<article class="alert-card">
+                    <div class="alert-top"><div class="alert-title"><span class="ticker">${escapeHtml(alert.ticker)}</span><span class="tier ${tierClass(alert.tier)}">${tierLabel(alert.tier)}</span></div><div class="score-big">${score}<span>/100</span></div></div>
+                    <div class="direction-line ${dirClass}"><span class="direction-arrow">${direction === "BEARISH" ? "↓" : "↑"}</span><span>${direction}</span></div>
+                    <div class="contract-row"><span class="contract">${escapeHtml(fmt(ibkr,"N/A"))}</span>${contract ? `<button class="copy-btn" data-contract="${escapeHtml(ibkr)}" onclick="copyIBKR(this)">COPIAR</button>` : ""}</div>
+                    <div class="levels"><div class="level"><div class="level-label">Entry</div><div class="level-value">${money(alert.entry)}</div></div><div class="level"><div class="level-label">SL</div><div class="level-value">${money(alert.sl)}</div></div><div class="level"><div class="level-label">TP1</div><div class="level-value">${money(alert.tp1)}</div></div><div class="level"><div class="level-label">TP2</div><div class="level-value">${money(alert.tp2)}</div></div></div>
+                    <div class="breakdown">${parts.map(([label, value]) => { const s = scoreValue(value); return `<div><div class="break-label"><span>${label}</span><span>${s}</span></div><div class="bar"><div class="bar-fill" style="width:${s}%"></div></div></div>`; }).join("")}</div>
+                    <div class="signals">${escapeHtml(signals || "Sin señales activas registradas.")}</div><div class="timestamp">${minutesAgo(alert.date)}</div>
+                </article>`;
+            }).join("");
+        }
+        function renderStats(stats) {
+            const cards = [["Total alertas", stats.total], ["Hoy", stats.today], ["Win Rate", `${fmt(stats.win_rate, 0)}%`], ["Abiertas", stats.open], ["Wins", stats.wins], ["Losses", stats.losses]];
+            els.stats.innerHTML = cards.map(([label, value]) => `<div class="stat-card"><div class="stat-label">${label}</div><div class="stat-value">${escapeHtml(fmt(value,0))}</div></div>`).join("");
+        }
+        function renderMarketContext(tide, stats) {
+            const direction = String(tide?.market_direction || "NEUTRAL").toUpperCase(), cls = direction === "BULLISH" ? "bullish" : direction === "BEARISH" ? "bearish" : "neutral";
+            const arrow = direction === "BULLISH" ? "↑" : direction === "BEARISH" ? "↓" : "→";
+            els.marketContext.innerHTML = `<div class="market-card"><div class="tide-head"><div><div class="stat-label">Market Tide</div><div class="tide-value ${cls}">${direction}</div></div><div class="tide-arrow ${cls}">${arrow}</div></div>
+                <div class="context-row"><span>Score promedio del día</span><strong>${fmt(stats.avg_score_today, 0)}/100</strong></div>
+                <div class="context-row"><span>Ventana institucional</span><strong>${institutionalWindow()}</strong></div>
+                <div class="context-row"><span>Net call premium</span><strong>${money(tide?.net_call_premium)}</strong></div>
+                <div class="context-row"><span>Net put premium</span><strong>${money(tide?.net_put_premium)}</strong></div></div>`;
+        }
+        function renderWatchlist(items) {
+            const scores = new Map(), phases = new Map();
+            latestAlerts.forEach((a) => { const t = String(a.ticker || "").toUpperCase(); if (t && !scores.has(t)) scores.set(t, scoreValue(a.score)); if (t && !phases.has(t)) phases.set(t, phaseLabel(a.icc_phase)); });
+            let list = Array.isArray(items) ? items : [];
+            if (!list.length && latestAlerts.length) list = latestAlerts.map((a) => ({ ticker:a.ticker, current_price:a.entry, day_change_pct:0, icc_phase:a.icc_phase, score:a.score }));
+            els.watchCount.textContent = `${list.length} activos`;
+            if (!list.length) { els.watchlist.innerHTML = `<div class="empty">Watchlist vacía. Agrega tickers desde la API para monitorearlos aquí.</div>`; return; }
+            els.watchlist.innerHTML = list.map((item) => {
+                const ticker = String(item.ticker || "N/A").toUpperCase(), score = scoreValue(item.score ?? scores.get(ticker) ?? 0), phase = phaseLabel(item.icc_phase ?? phases.get(ticker));
+                const change = Number(item.day_change_pct ?? 0), changeClass = change > 0 ? "positive" : change < 0 ? "negative" : "neutral";
+                return `<div class="watch-item ${currentFilter === ticker ? "active" : ""}" onclick="filterTicker('${escapeHtml(ticker)}')"><div class="watch-top"><span class="ticker">${escapeHtml(ticker)}</span><span class="phase ${phase.toLowerCase()}">${phase}</span></div>
+                    <div class="watch-price-row"><span class="price">${money(item.current_price)}</span><span class="change ${changeClass}">${pct(change)}</span></div>
+                    <div class="score-line"><span class="score-label">Score Livermore</span><span class="score-num">${score}/100</span></div><div class="progress"><div class="progress-fill" style="width:${score}%"></div></div></div>`;
+            }).join("");
+        }
+        function filterTicker(ticker) { currentFilter = ticker; renderAlerts(); renderWatchlist(latestWatchlist); }
+        els.clearFilter.addEventListener("click", () => { currentFilter = null; renderAlerts(); renderWatchlist(latestWatchlist); });
+        els.themeToggle.addEventListener("click", () => {
+            document.body.classList.toggle("light"); const light = document.body.classList.contains("light");
+            els.themeToggle.textContent = light ? "Modo noche" : "Modo día"; localStorage.setItem("livermore-theme", light ? "light" : "dark");
+        });
+        if (localStorage.getItem("livermore-theme") === "light") { document.body.classList.add("light"); els.themeToggle.textContent = "Modo noche"; }
+        async function refreshDashboard() {
+            try {
+                const [alerts, stats, watchlist, marketTide] = await Promise.all([getJson("/api/alerts?limit=200"), getJson("/api/stats"), getJson("/api/watchlist"), getJson("/api/market-tide")]);
+                latestAlerts = Array.isArray(alerts) ? alerts : []; latestWatchlist = Array.isArray(watchlist) ? watchlist : [];
+                renderAlerts(); renderStats(stats); renderMarketContext(marketTide, stats); renderWatchlist(latestWatchlist);
+                els.todayCount.textContent = stats.today ?? 0; lastScanDate = stats.last_scan ? new Date(stats.last_scan) : (latestAlerts[0]?.date ? new Date(latestAlerts[0].date) : null);
+                els.lastUpdate.textContent = "Actualizado"; updateLastScan();
+            } catch (error) { els.alerts.innerHTML = `<div class="empty">Error cargando datos: ${escapeHtml(error.message)}</div>`; els.lastUpdate.textContent = "Error"; }
+        }
+        function updateClock() { els.etClock.textContent = new Intl.DateTimeFormat("es-US", { timeZone:"America/New_York", hour:"2-digit", minute:"2-digit", second:"2-digit", hour12:false }).format(new Date()); }
+        function updateLastScan() { els.lastScan.textContent = lastScanDate ? minutesAgo(lastScanDate.toISOString()) : "--"; }
+        updateClock(); refreshDashboard(); setInterval(updateClock, 1000); setInterval(updateLastScan, 1000); setInterval(refreshDashboard, 30000);
+    </script>
+</body>
+</html>
+"""
+
+
 def _format_et(dt: Optional[datetime]) -> str:
     if not dt:
         return "--"
@@ -830,6 +1166,15 @@ def _format_et(dt: Optional[datetime]) -> str:
         dt = pytz.utc.localize(dt)
     et = dt.astimezone(pytz.timezone("America/New_York"))
     return f"{et.strftime('%b')} {et.day}, {et.year} — {et.strftime('%I:%M %p').lstrip('0')} ET"
+
+
+def _infer_direction(a: Alert) -> str:
+    regime = (a.regime or "").upper()
+    if "DOWN" in regime or "BEAR" in regime:
+        return "BEARISH"
+    if a.entry_price is not None and a.target1 is not None and a.target1 < a.entry_price:
+        return "BEARISH"
+    return "BULLISH"
 
 
 @app.get("/backtesting", response_class=HTMLResponse)
@@ -854,7 +1199,7 @@ async def backtesting_page(db: Session = Depends(get_db)):
             <td>{escape(_format_et(a.created_at))}</td>
             <td class="ticker">{escape(a.ticker or "--")}</td>
             <td>
-                <span class="ibkr-contract" data-raw="{escape(a.contract or '', quote=True)}">{escape(a.contract or "--")}</span>
+                <a class="ibkr-contract" data-raw="{escape(a.contract or '', quote=True)}" data-ticker="{escape(a.ticker or '', quote=True)}" href="#" target="_blank" rel="noopener">{escape(a.contract or "--")}</a>
                 <button class="copy-btn" data-contract="" onclick="copyIBKR(this)" title="Copiar contrato IBKR">📋</button>
             </td>
             <td>{a.score_total or 0}/100</td>
@@ -906,6 +1251,8 @@ async def backtesting_page(db: Session = Depends(get_db)):
         th,td { padding:13px 14px; border-bottom:1px solid rgba(255,255,255,.06); text-align:left; font-size:13px; }
         th { color:var(--muted); text-transform:uppercase; letter-spacing:.1em; font-size:11px; }
         .ticker { color:#fff; font-weight:800; }
+        .ibkr-contract { color:var(--blue); font-weight:800; text-decoration:none; }
+        .ibkr-contract:hover { text-decoration:underline; }
         .pnl { font-weight:800; color:var(--muted); }
         .pnl.win { color:var(--green); }
         .pnl.loss { color:var(--red); }
@@ -942,7 +1289,7 @@ async def backtesting_page(db: Session = Depends(get_db)):
     </section>
     <script>
         function toIBKR(raw) {
-            const m = String(raw || "").match(/^([A-Z]+)(\d{6})([CP])(\d{8})$/);
+            const m = String(raw || "").match(/^([A-Z]+)(\\d{6})([CP])(\\d{8})$/);
             if (!m) return raw;
             const strike = (parseInt(m[4]) / 1000).toString();
             return m[1] + " " + m[2] + m[3] + " " + strike;
@@ -959,7 +1306,11 @@ async def backtesting_page(db: Session = Depends(get_db)):
         document.querySelectorAll(".ibkr-contract").forEach((el) => {
             const raw = el.dataset.raw || el.textContent;
             const ibkr = toIBKR(raw);
+            const ticker = el.dataset.ticker || "";
             el.textContent = ibkr || "--";
+            el.href = ticker
+                ? `https://www.interactivebrokers.com/en/trading/contract-search.php?symbol=${encodeURIComponent(ticker)}`
+                : "#";
             const button = el.parentElement.querySelector(".copy-btn");
             if (button) {
                 button.dataset.contract = ibkr;
@@ -978,7 +1329,8 @@ def _serialize_alert(a: Alert) -> dict:
         "ticker":    a.ticker,
         "tier":      a.tier,
         "score":     a.score_total,
-        "direction": a.icc_phase,
+        "direction": _infer_direction(a),
+        "icc_phase": a.icc_phase,
         "entry":     a.entry_price,
         "sl":        a.stop_loss,
         "tp1":       a.target1,
@@ -1004,6 +1356,207 @@ def _serialize_alert(a: Alert) -> dict:
     }
 
 
+@app.get("/alerts", response_class=HTMLResponse)
+async def alerts_page():
+    return """
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>LIVERMORE AI — ALERTAS</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        :root { --bg:#0a0a0a; --panel:#111; --line:rgba(201,168,76,.24); --gold:#c9a84c; --text:#f2f2f2; --muted:#8f8f8f; --green:#27d17f; --red:#ff5c5c; --blue:#93c5fd; }
+        * { box-sizing:border-box; }
+        body { margin:0; min-height:100vh; color:var(--text); font-family:"Inter",system-ui,sans-serif; background:radial-gradient(circle at 15% 0%,rgba(201,168,76,.16),transparent 32%),var(--bg); padding:22px; }
+        header { display:flex; justify-content:space-between; align-items:center; gap:16px; border:1px solid var(--line); border-radius:18px; padding:18px 22px; background:linear-gradient(135deg,rgba(17,17,17,.98),rgba(10,10,10,.96)); box-shadow:0 24px 80px rgba(0,0,0,.45); }
+        h1 { margin:0; color:var(--gold); font-size:clamp(28px,3vw,40px); font-weight:800; }
+        .back { color:var(--gold); text-decoration:none; font-weight:800; border:1px solid rgba(201,168,76,.28); border-radius:999px; padding:10px 14px; background:rgba(201,168,76,.1); }
+        .panel { margin-top:18px; border:1px solid var(--line); border-radius:18px; overflow:hidden; background:rgba(17,17,17,.96); }
+        .panel-head { padding:16px 18px; color:var(--gold); background:rgba(201,168,76,.08); border-bottom:1px solid var(--line); font-weight:800; text-transform:uppercase; letter-spacing:.12em; }
+        table { width:100%; border-collapse:collapse; }
+        th,td { padding:13px 14px; border-bottom:1px solid rgba(255,255,255,.06); text-align:left; font-size:13px; white-space:nowrap; }
+        th { color:var(--muted); text-transform:uppercase; letter-spacing:.1em; font-size:11px; }
+        .ticker { color:#fff; font-weight:800; }
+        .tier { color:var(--gold); font-weight:800; }
+        .empty { padding:28px; color:var(--muted); text-align:center; }
+        .copy-btn { margin-left:8px; border:1px solid rgba(201,168,76,.28); border-radius:8px; background:rgba(201,168,76,.1); color:var(--gold); cursor:pointer; font-size:13px; padding:4px 7px; }
+        .ibkr-contract { color:var(--blue); font-weight:800; text-decoration:none; }
+        .ibkr-contract:hover { text-decoration:underline; }
+        @media (max-width:1100px) { header { flex-direction:column; align-items:flex-start; } .panel { overflow:auto; } table { min-width:1100px; } }
+    </style>
+</head>
+<body>
+    <header>
+        <div>
+            <h1>LIVERMORE AI — ALERTAS</h1>
+            <div style="color:var(--muted);font-size:13px;text-transform:uppercase;letter-spacing:.16em">Alertas activas en tiempo real</div>
+        </div>
+        <a class="back" href="/">← Dashboard</a>
+    </header>
+    <section class="panel">
+        <div class="panel-head">Feed activo — auto-refresh 30s</div>
+        <table>
+            <thead>
+                <tr><th>Fecha</th><th>Ticker</th><th>Score</th><th>Tier</th><th>Dirección</th><th>Contrato</th><th>Entry</th><th>SL</th><th>TP1</th><th>TP2</th><th>Status</th></tr>
+            </thead>
+            <tbody id="alertsBody"><tr><td colspan="11" class="empty">Cargando alertas...</td></tr></tbody>
+        </table>
+    </section>
+    <script>
+        function escapeHtml(value) {
+            return String(value ?? "").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;").replaceAll("'","&#039;");
+        }
+        function toIBKR(raw) {
+            const m = String(raw || "").match(/^([A-Z]+)(\\d{6})([CP])(\\d{8})$/);
+            if (!m) return raw || "";
+            const strike = (parseInt(m[4]) / 1000).toString();
+            return m[1] + " " + m[2] + m[3] + " " + strike;
+        }
+        async function copyIBKR(button) {
+            const text = button.dataset.contract || "";
+            if (!text) return;
+            await navigator.clipboard.writeText(text);
+            button.textContent = "✅";
+            setTimeout(() => { button.textContent = "📋"; }, 1000);
+        }
+        function tierLabel(tier) {
+            const value = Number(tier ?? 1);
+            if (value >= 3) return "LIVERMORE";
+            if (value === 2) return "PREMIUM";
+            return "ALERT";
+        }
+        function fmtMoney(value) {
+            const n = Number(value);
+            return Number.isFinite(n) && n > 0 ? "$" + n.toFixed(2) : "--";
+        }
+        function fmtDate(value) {
+            if (!value) return "--";
+            return new Intl.DateTimeFormat("es-US", { timeZone:"America/New_York", month:"short", day:"numeric", hour:"numeric", minute:"2-digit" }).format(new Date(value));
+        }
+        async function loadAlerts() {
+            const body = document.getElementById("alertsBody");
+            try {
+                const alerts = await fetch("/api/alerts?limit=200", { cache:"no-store" }).then(r => r.json());
+                if (!alerts.length) {
+                    body.innerHTML = `<tr><td colspan="11" class="empty">No hay alertas activas.</td></tr>`;
+                    return;
+                }
+                body.innerHTML = alerts.map((a) => {
+                    const raw = a.contract || "";
+                    const ibkr = toIBKR(raw);
+                    const contract = ibkr ? `<a class="ibkr-contract" href="https://www.interactivebrokers.com/en/trading/contract-search.php?symbol=${encodeURIComponent(a.ticker || "")}" target="_blank" rel="noopener">${escapeHtml(ibkr)}</a><button class="copy-btn" data-contract="${escapeHtml(ibkr)}" onclick="copyIBKR(this)">📋</button>` : "--";
+                    return `<tr>
+                        <td>${fmtDate(a.date)}</td><td class="ticker">${escapeHtml(a.ticker)}</td><td>${a.score ?? 0}/100</td><td class="tier">${tierLabel(a.tier)}</td>
+                        <td>${escapeHtml(a.direction || "--")}</td><td>${contract}</td><td>${fmtMoney(a.entry)}</td><td>${fmtMoney(a.sl)}</td><td>${fmtMoney(a.tp1)}</td><td>${fmtMoney(a.tp2)}</td><td>${escapeHtml(a.status || "--")}</td>
+                    </tr>`;
+                }).join("");
+            } catch (error) {
+                body.innerHTML = `<tr><td colspan="11" class="empty">Error cargando alertas: ${escapeHtml(error.message)}</td></tr>`;
+            }
+        }
+        loadAlerts();
+        setInterval(loadAlerts, 30000);
+    </script>
+</body>
+</html>
+"""
+
+
+@app.get("/watchlist", response_class=HTMLResponse)
+async def watchlist_page():
+    return """
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>LIVERMORE AI — WATCHLIST</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        :root { --bg:#0a0a0a; --panel:#111; --line:rgba(201,168,76,.24); --gold:#c9a84c; --text:#f2f2f2; --muted:#8f8f8f; --green:#27d17f; --red:#ff5c5c; }
+        * { box-sizing:border-box; }
+        body { margin:0; min-height:100vh; color:var(--text); font-family:"Inter",system-ui,sans-serif; background:radial-gradient(circle at 15% 0%,rgba(201,168,76,.16),transparent 32%),var(--bg); padding:22px; }
+        header { display:flex; justify-content:space-between; align-items:center; gap:16px; border:1px solid var(--line); border-radius:18px; padding:18px 22px; background:linear-gradient(135deg,rgba(17,17,17,.98),rgba(10,10,10,.96)); box-shadow:0 24px 80px rgba(0,0,0,.45); }
+        h1 { margin:0; color:var(--gold); font-size:clamp(28px,3vw,40px); font-weight:800; }
+        .back { color:var(--gold); text-decoration:none; font-weight:800; border:1px solid rgba(201,168,76,.28); border-radius:999px; padding:10px 14px; background:rgba(201,168,76,.1); }
+        .panel { margin-top:18px; border:1px solid var(--line); border-radius:18px; overflow:hidden; background:rgba(17,17,17,.96); }
+        .panel-head { padding:16px 18px; color:var(--gold); background:rgba(201,168,76,.08); border-bottom:1px solid var(--line); font-weight:800; text-transform:uppercase; letter-spacing:.12em; }
+        form { display:flex; gap:10px; padding:16px; border-bottom:1px solid rgba(255,255,255,.06); }
+        input { flex:1; border:1px solid var(--line); border-radius:12px; background:#0a0a0a; color:var(--text); padding:12px 14px; font-weight:800; text-transform:uppercase; }
+        button { border:1px solid rgba(201,168,76,.32); border-radius:12px; background:rgba(201,168,76,.12); color:var(--gold); cursor:pointer; font-weight:800; padding:10px 14px; }
+        .danger { border-color:rgba(255,92,92,.32); color:var(--red); background:rgba(255,92,92,.1); }
+        .item { display:flex; justify-content:space-between; align-items:center; gap:14px; padding:14px 16px; border-bottom:1px solid rgba(255,255,255,.06); }
+        .ticker { color:#fff; font-size:18px; font-weight:800; }
+        .notes { margin-top:4px; color:var(--muted); font-size:13px; }
+        .empty { padding:28px; color:var(--muted); text-align:center; }
+        @media (max-width:700px) { header, form, .item { flex-direction:column; align-items:stretch; } }
+    </style>
+</head>
+<body>
+    <header>
+        <div>
+            <h1>LIVERMORE AI — WATCHLIST</h1>
+            <div style="color:var(--muted);font-size:13px;text-transform:uppercase;letter-spacing:.16em">Tickers activos que monitorea el scanner</div>
+        </div>
+        <a class="back" href="/">← Dashboard</a>
+    </header>
+    <section class="panel">
+        <div class="panel-head">Gestión de watchlist</div>
+        <form id="addForm">
+            <input id="tickerInput" placeholder="Ticker, ej: NVDA" maxlength="10" required />
+            <input id="notesInput" placeholder="Notas opcionales" />
+            <button type="submit">AGREGAR</button>
+        </form>
+        <div id="watchlistItems"><div class="empty">Cargando watchlist...</div></div>
+    </section>
+    <script>
+        function escapeHtml(value) {
+            return String(value ?? "").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;").replaceAll("'","&#039;");
+        }
+        async function loadWatchlist() {
+            const target = document.getElementById("watchlistItems");
+            try {
+                const items = await fetch("/api/watchlist", { cache:"no-store" }).then(r => r.json());
+                if (!items.length) {
+                    target.innerHTML = `<div class="empty">Watchlist vacía. Agrega un ticker para empezar.</div>`;
+                    return;
+                }
+                target.innerHTML = items.map((item) => `
+                    <div class="item">
+                        <div><div class="ticker">${escapeHtml(item.ticker)}</div><div class="notes">${escapeHtml(item.notes || "sin notas")}</div></div>
+                        <button class="danger" onclick="removeTicker(${item.id})">ELIMINAR</button>
+                    </div>
+                `).join("");
+            } catch (error) {
+                target.innerHTML = `<div class="empty">Error cargando watchlist: ${escapeHtml(error.message)}</div>`;
+            }
+        }
+        async function removeTicker(id) {
+            await fetch(`/api/watchlist/${id}`, { method:"DELETE" });
+            loadWatchlist();
+        }
+        document.getElementById("addForm").addEventListener("submit", async (event) => {
+            event.preventDefault();
+            const ticker = document.getElementById("tickerInput").value.trim().toUpperCase();
+            const notes = document.getElementById("notesInput").value.trim();
+            if (!ticker) return;
+            await fetch(`/api/watchlist?ticker=${encodeURIComponent(ticker)}&notes=${encodeURIComponent(notes)}`, { method:"POST" });
+            event.target.reset();
+            loadWatchlist();
+        });
+        loadWatchlist();
+    </script>
+</body>
+</html>
+"""
+
+
 @app.get("/api/stats")
 async def get_stats(db: Session = Depends(get_db)):
     try:
@@ -1015,14 +1568,19 @@ async def get_stats(db: Session = Depends(get_db)):
         today  = datetime.utcnow().date()
         today_alerts = active.filter(
             Alert.created_at >= datetime(today.year, today.month, today.day)
-        ).count()
+        ).all()
+        today_count = len(today_alerts)
+        score_values = [a.score_total for a in today_alerts if a.score_total is not None]
+        latest = active.order_by(Alert.created_at.desc()).first()
         return {
             "total":    total,
-            "today":    today_alerts,
+            "today":    today_count,
             "wins":     wins,
             "losses":   losses,
             "open":     active.filter(Alert.status == "pending").count(),
             "win_rate": round(wins / closed * 100, 1) if closed > 0 else 0,
+            "avg_score_today": round(sum(score_values) / len(score_values), 1) if score_values else 0,
+            "last_scan": latest.created_at.isoformat() if latest and latest.created_at else None,
         }
     except Exception as e:
         logger.exception("get_stats error")
@@ -1070,6 +1628,24 @@ async def get_backtest(limit: int = Query(50), db: Session = Depends(get_db)):
         raise HTTPException(500, f"backtest_error: {type(e).__name__}: {e}")
 
 
+@app.get("/api/market-tide")
+async def get_market_tide():
+    try:
+        from core.uw_fetcher import UWFetcher
+        tide = await UWFetcher().get_market_tide()
+        return tide or {
+            "net_call_premium": 0,
+            "net_put_premium": 0,
+            "net_volume": 0,
+            "market_direction": "NEUTRAL",
+            "call_improving": False,
+            "bullish": False,
+        }
+    except Exception as e:
+        logger.exception("get_market_tide error")
+        raise HTTPException(500, f"market_tide_error: {type(e).__name__}: {e}")
+
+
 @app.patch("/api/alerts/{alert_id}")
 async def update_alert(
     alert_id: int,
@@ -1091,7 +1667,64 @@ async def update_alert(
 @app.get("/api/watchlist")
 async def get_watchlist(db: Session = Depends(get_db)):
     items = db.query(WatchlistItem).filter(WatchlistItem.active == True).all()
-    return [{"id": i.id, "ticker": i.ticker, "notes": i.notes} for i in items]
+    screener_by_ticker = {}
+    try:
+        from core.uw_fetcher import UWFetcher
+        uw = UWFetcher()
+        screener = await uw.get_screener(limit=50)
+        screener_by_ticker = {
+            str(row.get("ticker", "")).upper(): row
+            for row in screener
+            if row.get("ticker")
+        }
+    except Exception as e:
+        logger.warning(f"watchlist screener hydrate error: {e}")
+
+    def as_float(value, default=0):
+        try:
+            if value is None or value == "":
+                return default
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def day_change_pct(row):
+        for key in ("change_percent", "change_pct", "day_change_percent", "price_change_percent", "pct_change"):
+            if key in row:
+                return round(as_float(row.get(key)), 2)
+        price = as_float(row.get("price") or row.get("last_price") or row.get("close"))
+        prev_close = as_float(row.get("prev_close"))
+        if price and prev_close:
+            return round(((price - prev_close) / prev_close) * 100, 2)
+        return 0
+
+    result = []
+    for i in items:
+        ticker = i.ticker.upper()
+        screener_row = screener_by_ticker.get(ticker, {})
+        latest = (
+            db.query(Alert)
+            .filter(Alert.ticker == ticker)
+            .filter(Alert.mode != "BACKTEST")
+            .order_by(Alert.created_at.desc())
+            .first()
+        )
+        current_price = as_float(screener_row.get("prev_close"), None)
+        change_pct = day_change_pct(screener_row)
+        if latest:
+            current_price = latest.current_price or latest.entry_price or current_price
+            if latest.entry_price and current_price:
+                change_pct = round(((current_price - latest.entry_price) / latest.entry_price) * 100, 2)
+        result.append({
+            "id": i.id,
+            "ticker": ticker,
+            "notes": i.notes,
+            "current_price": current_price,
+            "day_change_pct": change_pct,
+            "icc_phase": latest.icc_phase if latest else "INDICATION",
+            "score": latest.score_total if latest else 0,
+        })
+    return result
 
 
 @app.post("/api/watchlist")
