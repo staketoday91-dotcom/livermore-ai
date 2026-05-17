@@ -1,0 +1,366 @@
+"""
+Livermore AI — Unusual Whales Fetcher
+Fuente unica de datos: UW API
+Endpoints activos: flow alerts, dark pool, net premium, GEX, screener, market tide
+"""
+import os
+import httpx
+import asyncio
+from datetime import datetime, date
+from typing import Optional
+import logging
+
+logger = logging.getLogger("livermore.fetcher")
+
+UW_TOKEN = os.getenv("UNUSUAL_WHALES_TOKEN", "")
+UW_BASE  = "https://api.unusualwhales.com/api"
+
+
+def _headers():
+    return {
+        "Authorization": f"Bearer {UW_TOKEN}",
+        "Accept": "application/json",
+    }
+
+
+class UWFetcher:
+    """
+    Unusual Whales como fuente unica de datos.
+    Todos los endpoints necesarios para el motor GBDS.
+    """
+
+    # ─── OPTIONS FLOW ────────────────────────────────────────────────────────
+
+    async def get_flow_alerts(self, min_premium: float = 100_000) -> list[dict]:
+        """Flow alerts con filtro de premium minimo."""
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(
+                f"{UW_BASE}/option-trades/flow-alerts",
+                headers=_headers(),
+                params={"limit": 50}
+            )
+        if r.status_code != 200:
+            logger.error(f"flow_alerts error {r.status_code}")
+            return []
+        data = r.json().get("data", [])
+        return [
+            d for d in data
+            if float(d.get("total_premium", 0)) >= min_premium
+        ]
+
+    async def get_ticker_flow(self, ticker: str) -> list[dict]:
+        """Flow de opciones para un ticker especifico."""
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(
+                f"{UW_BASE}/option-trades/flow-alerts",
+                headers=_headers(),
+                params={"ticker": ticker, "limit": 20}
+            )
+        if r.status_code != 200:
+            return []
+        return r.json().get("data", [])
+
+    # ─── DARK POOL ───────────────────────────────────────────────────────────
+
+    async def get_dark_pool(self, ticker: str) -> list[dict]:
+        """Prints de dark pool para un ticker."""
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(
+                f"{UW_BASE}/darkpool/{ticker}",
+                headers=_headers(),
+                params={"limit": 20}
+            )
+        if r.status_code != 200:
+            return []
+        return r.json().get("data", [])
+
+    async def analyze_dark_pool(self, ticker: str, current_price: float) -> Optional[dict]:
+        """
+        Analiza dark pool y retorna señal procesada para el scorer.
+        Detecta: cluster, absorcion, VWAP position, velocidad.
+        """
+        prints = await self.get_dark_pool(ticker)
+        if not prints:
+            return None
+
+        # Filtrar ultimas 2 horas
+        recent = []
+        now = datetime.utcnow()
+        for p in prints:
+            try:
+                executed = datetime.strptime(
+                    p["executed_at"].replace("Z", ""), "%Y-%m-%dT%H:%M:%S"
+                )
+                hours_ago = (now - executed).total_seconds() / 3600
+                if hours_ago <= 2:
+                    recent.append(p)
+            except:
+                recent.append(p)
+
+        if not recent:
+            recent = prints[:5]
+
+        total_premium = sum(float(p.get("premium", 0)) for p in recent)
+        largest = max(recent, key=lambda p: float(p.get("premium", 0)))
+        largest_price = float(largest.get("price", current_price))
+
+        # Cluster: 3+ prints en precio similar (±0.5%)
+        prices = [float(p.get("price", 0)) for p in recent]
+        cluster = False
+        for ref in prices:
+            near = [px for px in prices if abs(px - ref) / ref < 0.005]
+            if len(near) >= 3:
+                cluster = True
+                break
+
+        # Absorcion: volumen alto, rango estrecho (bid-ask tight)
+        absorption = False
+        for p in recent[:3]:
+            ask = float(p.get("nbbo_ask", 0))
+            bid = float(p.get("nbbo_bid", 0))
+            if ask > 0 and bid > 0:
+                spread = (ask - bid) / ask
+                if spread < 0.001 and float(p.get("premium", 0)) > 200_000:
+                    absorption = True
+                    break
+
+        # Velocidad: BURST si 3+ prints en < 5 min
+        velocity = "STEADY"
+        if len(recent) >= 3:
+            try:
+                t1 = datetime.strptime(recent[0]["executed_at"].replace("Z",""), "%Y-%m-%dT%H:%M:%S")
+                t2 = datetime.strptime(recent[2]["executed_at"].replace("Z",""), "%Y-%m-%dT%H:%M:%S")
+                if abs((t1 - t2).total_seconds()) < 300:
+                    velocity = "BURST"
+            except:
+                pass
+
+        # Session
+        hour = datetime.utcnow().hour - 4  # ET
+        if hour < 9 or (hour == 9 and datetime.utcnow().minute < 30):
+            session = "PRE"
+        elif hour >= 16:
+            session = "POST"
+        else:
+            session = "REGULAR"
+
+        return {
+            "print_price":  largest_price,
+            "print_size":   total_premium,
+            "above_vwap":   largest_price > current_price * 0.999,  # proxy
+            "cluster":      cluster,
+            "absorption":   absorption,
+            "session":      session,
+            "velocity":     velocity,
+            "total_premium": total_premium,
+            "print_count":  len(recent),
+        }
+
+    # ─── NET PREMIUM ─────────────────────────────────────────────────────────
+
+    async def get_net_premium(self, ticker: str) -> Optional[dict]:
+        """Net premium ticks — indica presion direccional real."""
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(
+                f"{UW_BASE}/stock/{ticker}/net-prem-ticks",
+                headers=_headers(),
+            )
+        if r.status_code != 200:
+            return None
+        data = r.json().get("data", [])
+        if not data:
+            return None
+
+        # Ultimas 5 velas para tendencia
+        recent = data[-5:]
+        net_calls = [float(d.get("net_call_premium", 0)) for d in recent]
+        net_puts  = [float(d.get("net_put_premium", 0)) for d in recent]
+        net_delta = [float(d.get("net_delta", 0)) for d in recent]
+
+        latest = recent[-1]
+        call_prem = float(latest.get("net_call_premium", 0))
+        put_prem  = float(latest.get("net_put_premium", 0))
+
+        # Tendencia: calls subiendo = bullish pressure
+        call_trend = net_calls[-1] - net_calls[0] if len(net_calls) > 1 else 0
+        put_trend  = net_puts[-1]  - net_puts[0]  if len(net_puts) > 1 else 0
+
+        return {
+            "net_call_premium":  call_prem,
+            "net_put_premium":   put_prem,
+            "net_delta":         float(latest.get("net_delta", 0)),
+            "call_trend":        call_trend,
+            "put_trend":         put_trend,
+            "bullish_pressure":  call_prem > 0 and call_trend > 0,
+            "bearish_pressure":  put_prem < 0 and put_trend < 0,
+            "call_volume":       latest.get("call_volume", 0),
+            "put_volume":        latest.get("put_volume", 0),
+        }
+
+    # ─── GEX / GREEKS ────────────────────────────────────────────────────────
+
+    async def get_gex(self, ticker: str) -> Optional[dict]:
+        """Gamma exposure — detecta si dealers amplifican o amortiguan moves."""
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(
+                f"{UW_BASE}/stock/{ticker}/greek-exposure",
+                headers=_headers(),
+            )
+        if r.status_code != 200:
+            return None
+        data = r.json().get("data", [])
+        if not data:
+            return None
+
+        latest = data[-1]
+        call_gamma = float(latest.get("call_gamma", 0))
+        put_gamma  = float(latest.get("put_gamma", 0))
+        net_gex    = call_gamma + put_gamma
+
+        return {
+            "net_gex":     net_gex,
+            "call_gamma":  call_gamma,
+            "put_gamma":   put_gamma,
+            "call_delta":  float(latest.get("call_delta", 0)),
+            "put_delta":   float(latest.get("put_delta", 0)),
+            "call_vanna":  float(latest.get("call_vanna", 0)),
+            "put_vanna":   float(latest.get("put_vanna", 0)),
+            "gex_positive": net_gex > 0,  # True = dealers amortiguan volatilidad
+        }
+
+    # ─── SCREENER ────────────────────────────────────────────────────────────
+
+    async def get_screener(self, limit: int = 30) -> list[dict]:
+        """
+        Stock screener — retorna tickers con actividad inusual.
+        Filtra por volumen de opciones y premium inusual.
+        """
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(
+                f"{UW_BASE}/screener/stocks",
+                headers=_headers(),
+                params={"limit": limit}
+            )
+        if r.status_code != 200:
+            return []
+        return r.json().get("data", [])
+
+    async def get_active_tickers(self) -> list[str]:
+        """
+        Retorna lista de tickers con mayor actividad institucional hoy.
+        Reemplaza el watchlist hardcoded.
+        """
+        data = await self.get_screener(limit=50)
+        if not data:
+            return ["SPY", "QQQ", "NVDA", "AAPL", "TSLA", "MSFT", "AMZN", "META"]
+
+        # Ordenar por premium total de opciones
+        sorted_data = sorted(
+            data,
+            key=lambda x: float(x.get("call_premium", 0)) + float(x.get("bearish_premium", 0)),
+            reverse=True
+        )
+
+        # Top 15 tickers con mayor actividad, excluyendo indices
+        exclude = {"SPXW", "SPX", "VIX", "NDX", "RUT"}
+        tickers = []
+        for item in sorted_data:
+            ticker = item.get("ticker", "")
+            if ticker and ticker not in exclude:
+                tickers.append(ticker)
+            if len(tickers) >= 15:
+                break
+
+        return tickers if tickers else ["SPY", "QQQ", "NVDA", "AAPL", "TSLA"]
+
+    # ─── MARKET TIDE ─────────────────────────────────────────────────────────
+
+    async def get_market_tide(self) -> Optional[dict]:
+        """
+        Market Tide — direccion del mercado en tiempo real.
+        Net call/put premium del mercado total.
+        """
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(
+                f"{UW_BASE}/market/market-tide",
+                headers=_headers(),
+            )
+        if r.status_code != 200:
+            return None
+        data = r.json().get("data", [])
+        if not data:
+            return None
+
+        # Ultimas 3 velas para tendencia
+        recent = data[-3:]
+        latest = recent[-1]
+
+        net_call = float(latest.get("net_call_premium", 0))
+        net_put  = float(latest.get("net_put_premium", 0))
+        net_vol  = float(latest.get("net_volume", 0))
+
+        # Tendencia de los ultimos periodos
+        if len(recent) >= 2:
+            prev_call = float(recent[-2].get("net_call_premium", 0))
+            call_improving = net_call > prev_call
+        else:
+            call_improving = net_call > 0
+
+        market_direction = "BULLISH" if net_call > 0 and net_vol > 0 else \
+                          "BEARISH" if net_put > 0 and net_vol < 0 else "NEUTRAL"
+
+        return {
+            "net_call_premium":  net_call,
+            "net_put_premium":   net_put,
+            "net_volume":        net_vol,
+            "market_direction":  market_direction,
+            "call_improving":    call_improving,
+            "bullish":           market_direction == "BULLISH",
+        }
+
+    # ─── PRECIO (via screener data) ──────────────────────────────────────────
+
+    async def get_ticker_data(self, ticker: str) -> Optional[dict]:
+        """Datos basicos del ticker via screener."""
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(
+                f"{UW_BASE}/screener/stocks",
+                headers=_headers(),
+                params={"ticker": ticker, "limit": 1}
+            )
+        if r.status_code != 200:
+            return None
+        data = r.json().get("data", [])
+        if not data:
+            return None
+
+        d = data[0]
+        return {
+            "ticker":          d.get("ticker"),
+            "prev_close":      float(d.get("prev_close", 0)),
+            "iv_rank":         float(d.get("iv_rank", 50)),
+            "iv30d":           float(d.get("iv30d", 0)),
+            "put_call_ratio":  float(d.get("put_call_ratio", 1)),
+            "call_premium":    float(d.get("call_premium", 0)),
+            "bearish_premium": float(d.get("bearish_premium", 0)),
+            "net_call_prem":   float(d.get("net_call_premium", 0)),
+            "total_oi":        int(d.get("total_open_interest", 0)),
+            "call_volume":     int(d.get("call_volume", 0)),
+            "gex_change":      float(d.get("gex_net_change", 0)),
+        }
+
+    # ─── EARNINGS ────────────────────────────────────────────────────────────
+
+    async def get_earnings_dte(self, ticker: str) -> int:
+        """Dias hasta earnings. Retorna 99 si no hay datos."""
+        try:
+            flow = await self.get_ticker_flow(ticker)
+            for f in flow[:5]:
+                er_time = f.get("er_time") or f.get("next_earnings_date")
+                if er_time:
+                    er_date = datetime.strptime(er_time[:10], "%Y-%m-%d").date()
+                    dte = (er_date - date.today()).days
+                    return max(dte, 0)
+        except:
+            pass
+        return 99
