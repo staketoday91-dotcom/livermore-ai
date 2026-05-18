@@ -154,10 +154,13 @@ async def lifespan(app: FastAPI):
             watchlist_count = _db.query(WatchlistItem).count()
             _db.close()
             
-            if backtest_count == 0:
+            auto_backfill_enabled = os.getenv("ENABLE_AUTO_BACKFILL", "false").lower() in {"1", "true", "yes"}
+            if auto_backfill_enabled and backtest_count == 0:
                 logger.info("DB vacía — iniciando backfill automático...")
                 from core.backfill import run_backfill
                 asyncio.create_task(run_backfill())
+            elif backtest_count == 0:
+                logger.info("Backfill automático desactivado; usar core/backfill.py manualmente si hace falta")
             
             if watchlist_count == 0:
                 logger.info("Watchlist vacía — seeding automático...")
