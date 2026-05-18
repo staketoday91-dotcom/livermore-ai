@@ -1015,6 +1015,10 @@ async def professional_dashboard():
         .phase.repeated { color:var(--amber); background:rgba(232,146,26,.14); border-color:rgba(232,146,26,.36); }
         .phase.single-leg { color:var(--green); background:rgba(39,209,127,.11); border-color:rgba(39,209,127,.32); }
         .phase.multi-leg { color:var(--red); background:rgba(255,92,92,.12); border-color:rgba(255,92,92,.32); }
+        .phase.delta-conviction { color:var(--green); background:rgba(39,209,127,.11); border-color:rgba(39,209,127,.32); }
+        .phase.delta-moderate { color:#f1c40f; background:rgba(241,196,15,.12); border-color:rgba(241,196,15,.3); }
+        .phase.delta-extreme { color:var(--red); background:rgba(255,92,92,.12); border-color:rgba(255,92,92,.32); }
+        .phase.delta-itm { color:var(--muted); background:rgba(148,163,184,.12); border-color:rgba(148,163,184,.28); }
         .category-badge.stock { color:#93c5fd; background:rgba(96,165,250,.12); border-color:rgba(96,165,250,.32); }
         .category-badge.etf { color:var(--amber); background:rgba(232,146,26,.14); border-color:rgba(232,146,26,.36); }
         .category-badge.index { color:var(--red); background:rgba(255,92,92,.12); border-color:rgba(255,92,92,.32); }
@@ -1174,6 +1178,14 @@ async def professional_dashboard():
                 ? `<span class="phase multi-leg">MULTI-LEG</span>`
                 : `<span class="phase single-leg">SINGLE LEG</span>`;
         }
+        function deltaBadge(delta) {
+            const d = Math.abs(Number(delta ?? 0.5));
+            let cls = "delta-conviction";
+            if (d > 0.70) cls = "delta-itm";
+            else if (d >= 0.15 && d < 0.30) cls = "delta-moderate";
+            else if (d < 0.15) cls = "delta-extreme";
+            return `<span class="phase ${cls}">Δ ${d.toFixed(2)}</span>`;
+        }
         function toIBKR(raw) { const m = String(raw || "").match(/^([A-Z]+)(\\d{6})([CP])(\\d{8})$/); if (!m) return raw || ""; return m[1] + " " + m[2] + m[3] + " " + (parseInt(m[4]) / 1000).toString(); }
         async function copyIBKR(button) { const text = button.dataset.contract || ""; if (!text) return; await navigator.clipboard.writeText(text); button.textContent = "COPIADO"; setTimeout(() => { button.textContent = "COPIAR"; }, 1000); }
         async function getJson(url) { const response = await fetch(url, { cache:"no-store" }); if (!response.ok) throw new Error(`${response.status} ${response.statusText}`); return response.json(); }
@@ -1203,7 +1215,7 @@ async def professional_dashboard():
                 const ibkr = contract ? toIBKR(contract) : "N/A", direction = directionLabel(alert), dirClass = direction === "BEARISH" ? "bearish" : "bullish";
                 const signals = [alert.icc_phase ? `ICC ${alert.icc_phase}` : null, alert.regime, alert.session, alert.signal].filter(Boolean).join(" · ");
                 return `<article class="alert-card">
-                    <div class="alert-top"><div class="alert-title"><span class="ticker">${escapeHtml(alert.ticker)}</span>${categoryBadge(alert.category)}<span class="tier ${tierClass(alert.tier)}">${tierLabel(alert.tier)}</span>${legBadge(alert)}${oiBadge(alert)}${ladderBadge(alert)}${repeatedBadge(alert)}</div><div class="score-big">${score}<span>/100</span></div></div>
+                    <div class="alert-top"><div class="alert-title"><span class="ticker">${escapeHtml(alert.ticker)}</span>${categoryBadge(alert.category)}<span class="tier ${tierClass(alert.tier)}">${tierLabel(alert.tier)}</span>${deltaBadge(alert.delta)}${legBadge(alert)}${oiBadge(alert)}${ladderBadge(alert)}${repeatedBadge(alert)}</div><div class="score-big">${score}<span>/100</span></div></div>
                     <div class="direction-line ${dirClass}"><span class="direction-arrow">${direction === "BEARISH" ? "↓" : "↑"}</span><span>${direction}</span></div>
                     <div class="contract-row"><span class="contract">${escapeHtml(fmt(ibkr,"N/A"))}</span><span class="score-num">${compactMoney(alert.nominal_value ?? alert.premium)}</span>${contract ? `<button class="copy-btn" data-contract="${escapeHtml(ibkr)}" onclick="copyIBKR(this)">COPIAR</button>` : ""}</div>
                     <div class="levels"><div class="level"><div class="level-label">Entry</div><div class="level-value">${money(alert.entry)}</div></div><div class="level"><div class="level-label">SL</div><div class="level-value">${money(alert.sl)}</div></div><div class="level"><div class="level-label">TP1</div><div class="level-value">${money(alert.tp1)}</div></div><div class="level"><div class="level-label">TP2</div><div class="level-value">${money(alert.tp2)}</div></div></div>
@@ -1297,6 +1309,17 @@ def _format_oi_trend(a: Alert) -> str:
     return f"OI ↑ {days}d{suffix}"
 
 
+def _delta_class(delta: Optional[float]) -> str:
+    d = abs(delta if delta is not None else 0.5)
+    if d > 0.70:
+        return "delta-itm"
+    if 0.15 <= d < 0.30:
+        return "delta-moderate"
+    if d < 0.15:
+        return "delta-extreme"
+    return "delta-conviction"
+
+
 @app.get("/backtesting", response_class=HTMLResponse)
 async def backtesting_page(db: Session = Depends(get_db)):
     alerts = (
@@ -1320,6 +1343,7 @@ async def backtesting_page(db: Session = Depends(get_db)):
             <td class="ticker">{escape(a.ticker or "--")}</td>
             <td>{escape(a.category or "STOCK")}</td>
             <td>{"SINGLE" if a.is_single_leg else "MULTI"}</td>
+            <td><span class="badge {_delta_class(a.delta)}">Δ {round(abs(a.delta if a.delta is not None else 0.5), 2)}</span></td>
             <td>
                 <a class="ibkr-contract" data-raw="{escape(a.contract or '', quote=True)}" data-ticker="{escape(a.ticker or '', quote=True)}" href="#" target="_blank" rel="noopener">{escape(a.contract or "--")}</a>
                 <button class="copy-btn" data-contract="" onclick="copyIBKR(this)" title="Copiar contrato IBKR">📋</button>
@@ -1385,6 +1409,10 @@ async def backtesting_page(db: Session = Depends(get_db)):
         .badge { display:inline-block; padding:5px 9px; border-radius:999px; font-size:11px; font-weight:800; background:rgba(148,163,184,.16); color:#cbd5e1; }
         .badge.win { color:var(--green); background:rgba(39,209,127,.12); }
         .badge.loss { color:var(--red); background:rgba(255,92,92,.12); }
+        .badge.delta-conviction { color:var(--green); background:rgba(39,209,127,.12); }
+        .badge.delta-moderate { color:#facc15; background:rgba(250,204,21,.12); }
+        .badge.delta-extreme { color:var(--red); background:rgba(255,92,92,.12); }
+        .badge.delta-itm { color:#cbd5e1; background:rgba(148,163,184,.14); }
         .copy-btn { margin-left:8px; border:1px solid rgba(96,165,250,.3); border-radius:8px; background:rgba(96,165,250,.12); color:var(--blue); cursor:pointer; font-size:13px; padding:4px 7px; }
         @media (max-width:900px) { .stats { grid-template-columns:1fr; } header { flex-direction:column; align-items:flex-start; } table { min-width:900px; } .panel { overflow:auto; } }
     </style>
@@ -1407,10 +1435,10 @@ async def backtesting_page(db: Session = Depends(get_db)):
         <table>
             <thead>
                 <tr>
-                    <th>Fecha Entrada</th><th>Ticker</th><th>Categoría</th><th>Tipo</th><th>Contrato</th><th>Nominal</th><th>OI Trend</th><th>Escalera</th><th>Flujo Repetido</th><th>Score</th><th>Dirección</th><th>P&L%</th><th>Status</th>
+                    <th>Fecha Entrada</th><th>Ticker</th><th>Categoría</th><th>Tipo</th><th>Delta</th><th>Contrato</th><th>Nominal</th><th>OI Trend</th><th>Escalera</th><th>Flujo Repetido</th><th>Score</th><th>Dirección</th><th>P&L%</th><th>Status</th>
                 </tr>
             </thead>
-            <tbody>""" + (rows or '<tr><td colspan="13">No hay backtests cargados.</td></tr>') + """</tbody>
+            <tbody>""" + (rows or '<tr><td colspan="14">No hay backtests cargados.</td></tr>') + """</tbody>
         </table>
     </section>
     <script>

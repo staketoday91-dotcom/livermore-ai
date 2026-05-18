@@ -103,6 +103,14 @@ def _nominal_value(data: dict) -> float:
     return contracts * premium * 100
 
 
+def _delta(data: dict) -> float:
+    greeks = data.get("greeks") if isinstance(data.get("greeks"), dict) else {}
+    value = _pick(data, "delta", default=None)
+    if value is None:
+        value = greeks.get("delta")
+    return _float(value, 0.50)
+
+
 def _is_single_leg(flow_item: dict) -> bool:
     tags = str(flow_item.get("tags", "")).lower()
     trade_type = str(flow_item.get("trade_type", "")).lower()
@@ -319,7 +327,7 @@ def _score_backtest(data: dict, dark_pool: DarkPoolSignal | None, oi_data: dict,
     executed_ask = ask_premium / nominal_value if nominal_value > 0 else 0
     is_sweep = _bool(_pick(data, "has_sweep", "is_sweep", "sweep", default=False))
     is_floor = _bool(_pick(data, "has_floor", "floor", default=False))
-    delta = abs(_float(_pick(data, "delta", default=0.5), 0.5))
+    delta = abs(_delta(data))
     iv_rank = _float(_pick(data, "iv_rank", default=50), 50)
     dte = _int(_pick(data, "dte", "days_to_expiration", default=30), 30)
     direction = _direction(data)

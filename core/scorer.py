@@ -110,6 +110,19 @@ class LivermoreScorer:
                 return score
         return 0
 
+    @staticmethod
+    def delta_modifier(delta: float) -> tuple[float, str]:
+        abs_delta = abs(delta)
+        if abs_delta >= 0.30 and abs_delta <= 0.70:
+            return 1.0, "Delta en zona de convicción (0.30-0.70)"
+        elif abs_delta > 0.70:
+            return 0.85, "Delta alto — posible hedge/cobertura"
+        elif abs_delta >= 0.15 and abs_delta < 0.30:
+            return 0.75, "Delta OTM moderado — requiere confirmación adicional"
+        elif abs_delta < 0.15:
+            return 0.50, "Delta OTM extremo — señal débil sin confirmación"
+        return 1.0, ""
+
     def score(
         self,
         ticker:         str,
@@ -192,6 +205,15 @@ class LivermoreScorer:
             score_opt = self.flow_score_for_nominal(nominal, category)
             if score_opt:
                 reasons.append(f"Options flow {category} ${nominal/1_000_000:.1f}M")
+
+            chain = chain_map or {}
+            delta_mult, delta_reason = self.delta_modifier(opt.delta)
+            if abs(opt.delta) < 0.15 and chain.get("has_ladder") and opt.repeated_flow:
+                delta_mult = 0.85
+                delta_reason = "OTM extremo rescatado por escalera + flujo repetido"
+            score_opt = min(25, round(score_opt * delta_mult))
+            if delta_reason:
+                reasons.append(delta_reason)
 
             oi = oi_data or {}
             if oi.get("oi_growing"):

@@ -63,6 +63,16 @@ def is_single_leg(flow_item: dict) -> bool:
     return True  # default a single-leg si no hay indicadores de multi-leg
 
 
+def _extract_delta(flow_item: dict) -> float:
+    greeks = flow_item.get("greeks") if isinstance(flow_item.get("greeks"), dict) else {}
+    delta = _float(flow_item.get("delta"), None)
+    if delta is None:
+        delta = _float(greeks.get("delta"), None)
+    if delta is None:
+        delta = 0.50
+    return delta
+
+
 def _with_nominal_value(alert: dict) -> dict:
     enriched = dict(alert)
     total_premium = _float(enriched.get("total_premium"))
@@ -84,6 +94,7 @@ def _with_nominal_value(alert: dict) -> dict:
         )
         enriched["nominal_value"] = contracts * premium * 100
     enriched["is_single_leg"] = is_single_leg(enriched)
+    enriched["delta"] = _extract_delta(enriched)
     return enriched
 
 
