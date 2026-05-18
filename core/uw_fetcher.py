@@ -6,7 +6,7 @@ Endpoints activos: flow alerts, dark pool, net premium, GEX, screener, market ti
 import os
 import httpx
 import asyncio
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import Optional
 import logging
 
@@ -128,8 +128,9 @@ def _group_repeated_flow(alerts: list[dict]) -> list[dict]:
 
 
 def _headers():
+    token = os.getenv("UNUSUAL_WHALES_TOKEN", UW_TOKEN)
     return {
-        "Authorization": f"Bearer {UW_TOKEN}",
+        "Authorization": f"Bearer {token}",
         "Accept": "application/json",
     }
 
@@ -398,6 +399,48 @@ class UWFetcher:
         return max(valid_rows, key=lambda row: row[0])[1]
 
         return None
+
+    async def get_macro_calendar(self) -> dict:
+        """
+        Obtiene eventos macro próximos de UW.
+        Eventos que afectan el score: FOMC, CPI, NFP, OPEX.
+        """
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(
+                f"{UW_BASE}/market/economic-calendar",
+                headers=_headers(),
+            )
+        if r.status_code != 200:
+            return {"has_event_today": False, "has_event_tomorrow": False, "events": []}
+
+        data = r.json().get("data", [])
+        today = date.today().isoformat()
+        tomorrow = (date.today() + timedelta(days=1)).isoformat()
+
+        high_impact = ["fomc", "cpi", "nfp", "opex", "pce", "gdp", "fed", "interest rate", "jobs"]
+        events_today = []
+        events_tomorrow = []
+
+        for event in data:
+            event_date = event.get("date", "")[:10]
+            title = event.get("title", event.get("name", ""))
+            normalized = title.lower()
+
+            if not any(keyword in normalized for keyword in high_impact):
+                continue
+
+            if event_date == today:
+                events_today.append(title)
+            elif event_date == tomorrow:
+                events_tomorrow.append(title)
+
+        return {
+            "has_event_today": len(events_today) > 0,
+            "has_event_tomorrow": len(events_tomorrow) > 0,
+            "events_today": events_today,
+            "events_tomorrow": events_tomorrow,
+            "events": events_today + events_tomorrow,
+        }
 
     # ─── DARK POOL ───────────────────────────────────────────────────────────
 

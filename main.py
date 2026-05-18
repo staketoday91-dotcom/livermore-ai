@@ -1070,6 +1070,10 @@ async def professional_dashboard():
         .stat-value { margin-top:7px; color:var(--text); font-size:28px; font-weight:800; font-variant-numeric:tabular-nums; }
         .market-card { padding:16px; margin-bottom:14px; }
         .rollover-card { border-color:rgba(201,168,76,.38); background:rgba(201,168,76,.07); }
+        .macro-card.today { border-color:rgba(192,57,43,.45); background:rgba(192,57,43,.12); }
+        .macro-card.tomorrow { border-color:rgba(232,146,26,.45); background:rgba(232,146,26,.12); }
+        .macro-card.clean { border-color:rgba(39,209,127,.28); background:rgba(39,209,127,.08); }
+        .macro-message { margin-top:10px; color:var(--text); font-size:13px; font-weight:800; line-height:1.45; }
         .rollover-pulse { display:inline-flex; width:8px; height:8px; border-radius:50%; background:var(--gold); box-shadow:0 0 0 0 rgba(201,168,76,.75); animation:pulseGold 1.6s infinite; }
         @keyframes pulseGold { 70% { box-shadow:0 0 0 10px rgba(201,168,76,0); } 100% { box-shadow:0 0 0 0 rgba(201,168,76,0); } }
         .rollover-item { padding:9px 0; border-top:1px solid rgba(201,168,76,.18); color:var(--muted); font-size:12px; line-height:1.4; }
@@ -1133,7 +1137,7 @@ async def professional_dashboard():
 
             <section class="panel">
                 <div class="panel-head"><h2 class="panel-title">Stats + Market Context</h2><span class="panel-meta" id="lastUpdate">Sin datos</span></div>
-                <div class="stats"><div id="marketContext"></div><div id="rollovers"></div><div class="stats-grid" id="stats"></div></div>
+                <div class="stats"><div id="marketContext"></div><div id="macroCalendar"></div><div id="rollovers"></div><div class="stats-grid" id="stats"></div></div>
             </section>
         </main>
 
@@ -1147,7 +1151,7 @@ async def professional_dashboard():
         const els = {
             alerts: document.getElementById("alerts"), alertFilter: document.getElementById("alertFilter"),
             clearFilter: document.getElementById("clearFilter"), filterTicker: document.getElementById("filterTicker"),
-            marketContext: document.getElementById("marketContext"), rollovers: document.getElementById("rollovers"), stats: document.getElementById("stats"),
+            marketContext: document.getElementById("marketContext"), macroCalendar: document.getElementById("macroCalendar"), rollovers: document.getElementById("rollovers"), stats: document.getElementById("stats"),
             themeToggle: document.getElementById("themeToggle"), manualScanBtn: document.getElementById("manualScanBtn"), todayCount: document.getElementById("todayCount"),
             watchlist: document.getElementById("watchlist"), watchCount: document.getElementById("watchCount"),
             lastUpdate: document.getElementById("lastUpdate"), lastScan: document.getElementById("lastScan"), etClock: document.getElementById("etClock")
@@ -1263,6 +1267,24 @@ async def professional_dashboard():
                 ${list.map((r) => `<div class="rollover-item">→ DESDE <strong>${escapeHtml(r.from_ticker)}</strong> HACIA <strong>${escapeHtml(r.to_ticker)}</strong> | ${compactMoney(r.to_nominal)} | Confianza ${escapeHtml(r.confidence)}%</div>`).join("")}
             </div>`;
         }
+        function renderMacroCalendar(macro) {
+            const today = Array.isArray(macro?.events_today) ? macro.events_today : [];
+            const tomorrow = Array.isArray(macro?.events_tomorrow) ? macro.events_tomorrow : [];
+            if (macro?.has_event_today) {
+                els.macroCalendar.innerHTML = `<div class="market-card macro-card today"><div class="stat-label">Calendario Macro</div><div class="macro-message">⚠️ EVENTO MACRO HOY: ${escapeHtml(today.join(", ") || "Evento de alto impacto")}</div></div>`;
+            } else if (macro?.has_event_tomorrow) {
+                els.macroCalendar.innerHTML = `<div class="market-card macro-card tomorrow"><div class="stat-label">Calendario Macro</div><div class="macro-message">⚡ EVENTO MAÑANA: ${escapeHtml(tomorrow.join(", ") || "Evento de alto impacto")}</div></div>`;
+            } else {
+                els.macroCalendar.innerHTML = `<div class="market-card macro-card clean"><div class="stat-label">Calendario Macro</div><div class="macro-message">✅ Sin eventos macro próximos</div></div>`;
+            }
+        }
+        async function refreshMacroCalendar() {
+            try {
+                renderMacroCalendar(await getJson("/api/macro"));
+            } catch (error) {
+                els.macroCalendar.innerHTML = `<div class="market-card"><div class="stat-label">Calendario Macro</div><div class="context-row"><span>Error</span><strong>${escapeHtml(error.message)}</strong></div></div>`;
+            }
+        }
         async function refreshRollovers() {
             try {
                 renderRollovers(await getJson("/api/rollovers"));
@@ -1320,14 +1342,14 @@ async def professional_dashboard():
             try {
                 const [alerts, stats, watchlist, marketTide] = await Promise.all([getJson("/api/alerts?limit=200"), getJson("/api/stats"), getJson("/api/watchlist"), getJson("/api/market-tide")]);
                 latestAlerts = Array.isArray(alerts) ? alerts : []; latestWatchlist = Array.isArray(watchlist) ? watchlist : [];
-                renderAlerts(); renderStats(stats); renderMarketContext(marketTide, stats); renderWatchlist(latestWatchlist); refreshRollovers();
+                renderAlerts(); renderStats(stats); renderMarketContext(marketTide, stats); renderWatchlist(latestWatchlist); refreshRollovers(); refreshMacroCalendar();
                 els.todayCount.textContent = stats.today ?? 0; lastScanDate = stats.last_scan ? new Date(stats.last_scan) : (latestAlerts[0]?.date ? new Date(latestAlerts[0].date) : null);
                 els.lastUpdate.textContent = "Actualizado"; updateLastScan();
             } catch (error) { els.alerts.innerHTML = `<div class="empty">Error cargando datos: ${escapeHtml(error.message)}</div>`; els.lastUpdate.textContent = "Error"; }
         }
         function updateClock() { els.etClock.textContent = new Intl.DateTimeFormat("es-US", { timeZone:"America/New_York", hour:"2-digit", minute:"2-digit", second:"2-digit", hour12:false }).format(new Date()); }
         function updateLastScan() { els.lastScan.textContent = lastScanDate ? minutesAgo(lastScanDate.toISOString()) : "--"; }
-        updateClock(); refreshDashboard(); setInterval(updateClock, 1000); setInterval(updateLastScan, 1000); setInterval(refreshDashboard, 30000); setInterval(refreshRollovers, 60000);
+        updateClock(); refreshDashboard(); setInterval(updateClock, 1000); setInterval(updateLastScan, 1000); setInterval(refreshDashboard, 30000); setInterval(refreshRollovers, 60000); setInterval(refreshMacroCalendar, 300000);
     </script>
 </body>
 </html>
@@ -1913,6 +1935,16 @@ async def get_market_tide():
     except Exception as e:
         logger.exception("get_market_tide error")
         raise HTTPException(500, f"market_tide_error: {type(e).__name__}: {e}")
+
+
+@app.get("/api/macro")
+async def get_macro():
+    try:
+        from core.uw_fetcher import UWFetcher
+        return await UWFetcher().get_macro_calendar()
+    except Exception as e:
+        logger.exception("get_macro error")
+        raise HTTPException(500, f"macro_error: {type(e).__name__}: {e}")
 
 
 @app.get("/api/rollovers")

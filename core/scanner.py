@@ -53,6 +53,9 @@ class LivermoreScanner:
         market_tide = await self.uw.get_market_tide()
         market_direction = market_tide.get("market_direction", "NEUTRAL") if market_tide else "NEUTRAL"
         logger.info(f"Market Tide: {market_direction}")
+        macro_calendar = await self.uw.get_macro_calendar()
+        if macro_calendar.get("events"):
+            logger.info(f"Eventos macro proximos: {', '.join(macro_calendar.get('events', [])[:3])}")
 
         # Tickers activos segun UW screener (no watchlist hardcoded)
         tickers = await self._get_tickers()
@@ -72,6 +75,7 @@ class LivermoreScanner:
                     ticker,
                     session,
                     market_tide,
+                    macro_calendar,
                     rollover_detected=ticker in rollover_targets,
                 )
                 if result:
@@ -91,6 +95,7 @@ class LivermoreScanner:
 
     async def _analyze_ticker(self, ticker: str, session: str,
                                market_tide: Optional[dict],
+                               macro_calendar: Optional[dict],
                                rollover_detected: bool = False) -> Optional[dict]:
 
         # ─── 1. Datos del ticker via UW ──────────────────────
@@ -250,6 +255,7 @@ class LivermoreScanner:
             category=category,
             chain_map=chain_map,
             rollover_detected=rollover_detected,
+            macro_calendar=macro_calendar,
         )
 
         # ─── 15. Contrato recomendado del flow alert ──────────

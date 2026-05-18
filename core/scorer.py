@@ -141,6 +141,7 @@ class LivermoreScorer:
         category:       str = "STOCK",
         chain_map:      Optional[dict] = None,
         rollover_detected: bool = False,
+        macro_calendar: Optional[dict] = None,
     ) -> LivermoreScorecardResult:
 
         score_icc       = 0
@@ -294,6 +295,17 @@ class LivermoreScorer:
         if rollover_detected:
             total += 8
             reasons.append("ROLLOVER DETECTADO — capital movido desde posición anterior")
+        if macro_calendar:
+            if macro_calendar.get("has_event_today"):
+                total = int(total * 0.70)
+                events = ", ".join(macro_calendar.get("events_today", [])[:2])
+                suffix = f": {events}" if events else ""
+                reasons.append(f"⚠️ EVENTO MACRO HOY{suffix} — score reducido 30%")
+            elif macro_calendar.get("has_event_tomorrow"):
+                total = int(total * 0.85)
+                events = ", ".join(macro_calendar.get("events_tomorrow", [])[:2])
+                suffix = f": {events}" if events else ""
+                reasons.append(f"⚠️ EVENTO MACRO MAÑANA{suffix} — score reducido 15%")
         total = max(0, min(total, 100))
 
         # ─── DECISION ────────────────────────────────────────

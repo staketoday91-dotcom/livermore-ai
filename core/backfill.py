@@ -322,7 +322,14 @@ def _dark_pool_signal(rows: list[dict], current_price: float) -> DarkPoolSignal 
     )
 
 
-def _score_backtest(data: dict, dark_pool: DarkPoolSignal | None, oi_data: dict, chain_map: dict, category: str):
+def _score_backtest(
+    data: dict,
+    dark_pool: DarkPoolSignal | None,
+    oi_data: dict,
+    chain_map: dict,
+    category: str,
+    macro_calendar: dict | None = None,
+):
     nominal_value = _nominal_value(data)
     accumulated_nominal = _float(data.get("accumulated_nominal"), nominal_value)
     volume = _int(_pick(data, "volume", "total_volume", default=0))
@@ -379,6 +386,7 @@ def _score_backtest(data: dict, dark_pool: DarkPoolSignal | None, oi_data: dict,
         oi_data=oi_data,
         category=category,
         chain_map=chain_map,
+        macro_calendar=macro_calendar,
     )
     return result, accumulated_nominal, direction, options
 
@@ -446,6 +454,7 @@ async def main():
     contract_price_cache: dict[str, float | None] = {}
     oi_cache: dict[str, dict] = {}
     chain_cache: dict[str, dict] = {}
+    macro_calendar = await UWFetcher().get_macro_calendar()
 
     async with httpx.AsyncClient(timeout=30) as client:
         for row in rows:
@@ -482,7 +491,7 @@ async def main():
             dark_pool = _dark_pool_signal(dark_pool_cache.get(ticker, []), current_price)
             oi_data = oi_cache.get(ticker, {"oi_growing": False, "oi_change_pct": 0, "days_growing": 0})
             chain_map = chain_cache.get(ticker, {})
-            score, nominal_value, direction, options = _score_backtest(row, dark_pool, oi_data, chain_map, category)
+            score, nominal_value, direction, options = _score_backtest(row, dark_pool, oi_data, chain_map, category, macro_calendar)
             entry_contract_price = _contract_entry_price(row, historic_cache.get(options.contract, []), nominal_value)
             current_contract_price = contract_price_cache.get(options.contract)
             result_status, pnl_pct = _result_from_option_prices(entry_contract_price, current_contract_price)
