@@ -16,6 +16,7 @@ load_dotenv(ROOT / ".env")
 
 from core.models import Alert, Base, engine, SessionLocal  # noqa: E402
 from core.scorer import DarkPoolSignal, LivermoreScorer, OptionsFlowSignal, MacroContext  # noqa: E402
+from core.uw_fetcher import classify_ticker  # noqa: E402
 
 UW_BASE = "https://api.unusualwhales.com/api"
 UW_TOKEN = os.getenv("UNUSUAL_WHALES_TOKEN", "")
@@ -73,6 +74,10 @@ def _contract(data: dict) -> str:
     return " ".join(str(v) for v in (ticker, strike, option_type, expiry) if v)
 
 
+def _contract_key(data: dict) -> str:
+    return _contract(data) or "|".join(str(_pick(data, key, default="")) for key in ("ticker", "strike", "expiration", "expiry", "option_type"))
+
+
 def _alert_date(data: dict) -> str | None:
     raw = _pick(data, "created_at", "executed_at", "date", default=None)
     if not raw:
@@ -96,6 +101,23 @@ def _nominal_value(data: dict) -> float:
     contracts = _float(_pick(data, "contracts", "volume", "total_volume", "size", "quantity", default=0))
     premium = _float(_pick(data, "premium", "price", "avg_price", "last_price", default=0))
     return contracts * premium * 100
+
+
+def _attach_repeated_flow(rows: list[dict]) -> list[dict]:
+    groups: dict[str, list[dict]] = {}
+    for row in rows:
+        groups.setdefault(_contract_key(row), []).append(row)
+
+    enriched_rows = []
+    for row in rows:
+        group = groups.get(_contract_key(row), [row])
+        accumulated = sum(_nominal_value(item) for item in group)
+        enriched = dict(row)
+        enriched["accumulated_nominal"] = accumulated
+        enriched["flow_count"] = len(group)
+        enriched["repeated_flow"] = len(group) >= 3
+        enriched_rows.append(enriched)
+    return enriched_rows
 
 
 async def fetch_dark_pool(client: httpx.AsyncClient, ticker: str) -> list[dict]:
@@ -156,6 +178,48 @@ async def fetch_oi_change(client: httpx.AsyncClient, ticker: str) -> dict:
         "days_growing": days_growing,
         "today_oi": int(today_oi),
         "yesterday_oi": int(yesterday_oi),
+    }
+
+
+async def fetch_option_chain_map(client: httpx.AsyncClient, ticker: str) -> dict:
+    response = await client.get(
+        f"{UW_BASE}/stock/{ticker}/option-contracts",
+        headers=_headers(),
+        params={"limit": 100},
+    )
+    if response.status_code != 200:
+        return {}
+
+    data = response.json().get("data", [])
+    calls = [d for d in data if d.get("option_type") == "call"]
+    puts = [d for d in data if d.get("option_type") == "put"]
+    calls.sort(key=lambda x: _float(x.get("strike", 0)))
+    puts.sort(key=lambda x: _float(x.get("strike", 0)))
+
+    ladder_strikes = [
+        _float(call.get("strike", 0))
+        for call in calls
+        if _int(call.get("open_interest", 0)) > 500
+    ]
+    put_strikes_with_oi = [
+        _float(put.get("strike", 0))
+        for put in puts
+        if _int(put.get("open_interest", 0)) > 200
+    ]
+    gaps = []
+    for i in range(len(put_strikes_with_oi) - 1):
+        gap = put_strikes_with_oi[i + 1] - put_strikes_with_oi[i]
+        if gap > put_strikes_with_oi[i] * 0.08:
+            gaps.append({"from": put_strikes_with_oi[i], "to": put_strikes_with_oi[i + 1], "gap": gap})
+
+    top_call = max(calls, key=lambda x: _int(x.get("open_interest", 0)), default={})
+    return {
+        "has_ladder": len(ladder_strikes) >= 3,
+        "ladder_strikes": ladder_strikes[:5],
+        "put_gaps": gaps[:3],
+        "target_strike": _float(top_call.get("strike", 0)) if top_call else 0,
+        "call_count_with_oi": len(ladder_strikes),
+        "put_strikes_with_oi": put_strikes_with_oi[:5],
     }
 
 
@@ -231,8 +295,9 @@ def _dark_pool_signal(rows: list[dict], current_price: float) -> DarkPoolSignal 
     )
 
 
-def _score_backtest(data: dict, dark_pool: DarkPoolSignal | None, oi_data: dict):
+def _score_backtest(data: dict, dark_pool: DarkPoolSignal | None, oi_data: dict, chain_map: dict, category: str):
     nominal_value = _nominal_value(data)
+    accumulated_nominal = _float(data.get("accumulated_nominal"), nominal_value)
     volume = _int(_pick(data, "volume", "total_volume", default=0))
     open_interest = max(_int(_pick(data, "open_interest", "oi", default=1), 1), 1)
     vol_oi = _float(_pick(data, "volume_oi_ratio", "vol_oi_ratio", default=volume / open_interest))
@@ -263,6 +328,9 @@ def _score_backtest(data: dict, dark_pool: DarkPoolSignal | None, oi_data: dict)
         iv_rank=iv_rank,
         expiration_dte=dte,
         contract=_contract(data),
+        repeated_flow=_bool(data.get("repeated_flow")),
+        flow_count=_int(data.get("flow_count")),
+        accumulated_nominal=accumulated_nominal,
     )
     macro = MacroContext(market_session="BACKTEST", vix_level=15.0)
 
@@ -280,8 +348,10 @@ def _score_backtest(data: dict, dark_pool: DarkPoolSignal | None, oi_data: dict)
         adx=25.0,
         regime="BACKTEST_TRENDING",
         oi_data=oi_data,
+        category=category,
+        chain_map=chain_map,
     )
-    return result, nominal_value, direction, options
+    return result, accumulated_nominal, direction, options
 
 
 def _tier_num(score: int) -> int:
@@ -309,12 +379,13 @@ async def main():
         raise RuntimeError("UNUSUAL_WHALES_TOKEN no configurado")
 
     Base.metadata.create_all(bind=engine)
-    rows = await fetch_flow_alerts()
+    rows = _attach_repeated_flow(await fetch_flow_alerts())
     loaded = 0
     max_score = 0
     dark_pool_cache: dict[str, list[dict]] = {}
     historic_cache: dict[str, list[dict]] = {}
     oi_cache: dict[str, dict] = {}
+    chain_cache: dict[str, dict] = {}
 
     async with httpx.AsyncClient(timeout=30) as client:
         for row in rows:
@@ -323,6 +394,8 @@ async def main():
                 dark_pool_cache[ticker] = await fetch_dark_pool(client, ticker)
             if ticker and ticker not in oi_cache:
                 oi_cache[ticker] = await fetch_oi_change(client, ticker)
+            if ticker and ticker not in chain_cache:
+                chain_cache[ticker] = await fetch_option_chain_map(client, ticker)
             contract = _contract(row)
             if contract and contract not in historic_cache:
                 historic_cache[contract] = await fetch_option_historic(client, contract)
@@ -335,23 +408,26 @@ async def main():
 
         for row in rows:
             nominal_value = _nominal_value(row)
-            if nominal_value < 500_000:
+            accumulated_nominal = _float(row.get("accumulated_nominal"), nominal_value)
+            category = classify_ticker(ticker := _ticker(row))
+            if accumulated_nominal < LivermoreScorer.min_nominal_for_category(category):
                 continue
 
-            ticker = _ticker(row)
             if not ticker:
                 continue
 
             current_price = _float(_pick(row, "underlying_price", "spot_price", "price", default=0))
             dark_pool = _dark_pool_signal(dark_pool_cache.get(ticker, []), current_price)
             oi_data = oi_cache.get(ticker, {"oi_growing": False, "oi_change_pct": 0, "days_growing": 0})
-            score, nominal_value, direction, options = _score_backtest(row, dark_pool, oi_data)
+            chain_map = chain_cache.get(ticker, {})
+            score, nominal_value, direction, options = _score_backtest(row, dark_pool, oi_data, chain_map, category)
             result_status, pnl_pct = _result_from_prices(row, historic_cache.get(options.contract, []))
             max_score = max(max_score, score.total)
             alert = Alert(
                 ticker=ticker,
                 asset_type="OPTION",
                 mode="BACKTEST",
+                category=category,
                 tier=_tier_num(score.total),
                 score_total=score.total,
                 score_icc=score.icc,
@@ -376,6 +452,13 @@ async def main():
                 oi_days_growing=oi_data.get("days_growing", 0),
                 oi_today=oi_data.get("today_oi"),
                 oi_yesterday=oi_data.get("yesterday_oi"),
+                has_ladder=bool(chain_map.get("has_ladder")),
+                ladder_strikes=chain_map.get("ladder_strikes", []),
+                put_gaps=chain_map.get("put_gaps", []),
+                target_strike=chain_map.get("target_strike"),
+                repeated_flow=options.repeated_flow,
+                flow_count=options.flow_count,
+                accumulated_nominal=options.accumulated_nominal,
                 dp_print_price=dark_pool.print_price if dark_pool else None,
                 dp_print_size=dark_pool.print_size if dark_pool else None,
                 dp_above_vwap=dark_pool.above_vwap if dark_pool else None,

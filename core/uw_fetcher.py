@@ -15,6 +15,19 @@ logger = logging.getLogger("livermore.fetcher")
 UW_TOKEN = os.getenv("UNUSUAL_WHALES_TOKEN", "")
 UW_BASE  = "https://api.unusualwhales.com/api"
 
+ETF_LIST = {"SPY", "QQQ", "IWM", "DIA", "XLF", "XLE", "XLK", "XLV", "XLI", "XLB", "XLU", "XLRE", "XLC", "XLY", "XLP", "GLD", "SLV", "TLT", "HYG", "EEM", "SOXL", "SOXS", "TQQQ", "UVXY", "VXX"}
+
+INDEX_LIST = {"SPX", "SPXW", "NDX", "RUT", "VIX", "COMP"}
+
+
+def classify_ticker(ticker: str) -> str:
+    ticker = (ticker or "").upper()
+    if ticker in INDEX_LIST:
+        return "INDEX"
+    if ticker in ETF_LIST:
+        return "ETF"
+    return "STOCK"
+
 
 def _float(value, default: float = 0.0) -> float:
     try:
@@ -47,6 +60,34 @@ def _with_nominal_value(alert: dict) -> dict:
     )
     enriched["nominal_value"] = contracts * premium * 100
     return enriched
+
+
+def _flow_contract_key(alert: dict) -> str:
+    return str(
+        alert.get("option_chain")
+        or alert.get("contract")
+        or alert.get("option_symbol")
+        or "|".join(str(alert.get(k, "")) for k in ("ticker", "strike", "expiration", "expiry", "option_type"))
+    )
+
+
+def _group_repeated_flow(alerts: list[dict]) -> list[dict]:
+    groups: dict[str, list[dict]] = {}
+    for alert in alerts:
+        groups.setdefault(_flow_contract_key(alert), []).append(_with_nominal_value(alert))
+
+    grouped = []
+    for rows in groups.values():
+        accumulated = sum(_float(row.get("nominal_value")) for row in rows)
+        best = max(rows, key=lambda row: _float(row.get("nominal_value")))
+        enriched = dict(best)
+        enriched["accumulated_nominal"] = accumulated
+        enriched["flow_count"] = len(rows)
+        enriched["repeated_flow"] = len(rows) >= 3
+        enriched["nominal_value"] = accumulated
+        grouped.append(enriched)
+
+    return sorted(grouped, key=lambda row: _float(row.get("accumulated_nominal")), reverse=True)
 
 
 def _headers():
@@ -92,7 +133,7 @@ class UWFetcher:
             )
         if r.status_code != 200:
             return []
-        return [_with_nominal_value(d) for d in r.json().get("data", [])]
+        return _group_repeated_flow(r.json().get("data", []))
 
     async def get_oi_change(self, ticker: str) -> dict:
         """
@@ -138,6 +179,63 @@ class UWFetcher:
             "days_growing": days_growing,
             "today_oi": int(today_oi),
             "yesterday_oi": int(yesterday_oi)
+        }
+
+    async def get_option_chain_map(self, ticker: str) -> dict:
+        """
+        Lee el option chain completo y detecta:
+        1. Escalera de calls — strikes consecutivos con OI creciente
+        2. Gaps en puts — distancia entre strikes con OI significativo
+        3. Strike target más probable — donde se concentra el OI de calls
+        """
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(
+                f"{UW_BASE}/stock/{ticker}/option-contracts",
+                headers=_headers(),
+                params={"limit": 100}
+            )
+        if r.status_code != 200:
+            return {}
+        
+        data = r.json().get("data", [])
+        
+        calls = [d for d in data if d.get("option_type") == "call"]
+        puts = [d for d in data if d.get("option_type") == "put"]
+        
+        # Ordenar por strike
+        calls.sort(key=lambda x: float(x.get("strike", 0)))
+        puts.sort(key=lambda x: float(x.get("strike", 0)))
+        
+        # Detectar escalera en calls
+        # Escalera = 3+ strikes consecutivos con OI > 500 cada uno
+        ladder_strikes = []
+        for call in calls:
+            oi = int(call.get("open_interest", 0))
+            strike = float(call.get("strike", 0))
+            if oi > 500:
+                ladder_strikes.append(strike)
+        
+        has_ladder = len(ladder_strikes) >= 3
+        
+        # Detectar gaps en puts (distancia > 10% entre strikes con OI)
+        put_strikes_with_oi = [float(p.get("strike", 0)) for p in puts if int(p.get("open_interest", 0)) > 200]
+        gaps = []
+        for i in range(len(put_strikes_with_oi) - 1):
+            gap = put_strikes_with_oi[i+1] - put_strikes_with_oi[i]
+            if gap > put_strikes_with_oi[i] * 0.08:  # gap > 8% del precio del strike
+                gaps.append({"from": put_strikes_with_oi[i], "to": put_strikes_with_oi[i+1], "gap": gap})
+        
+        # Strike target = call con mayor OI
+        top_call = max(calls, key=lambda x: int(x.get("open_interest", 0)), default={})
+        target_strike = float(top_call.get("strike", 0)) if top_call else 0
+        
+        return {
+            "has_ladder": has_ladder,
+            "ladder_strikes": ladder_strikes[:5],
+            "put_gaps": gaps[:3],
+            "target_strike": target_strike,
+            "call_count_with_oi": len(ladder_strikes),
+            "put_strikes_with_oi": put_strikes_with_oi[:5]
         }
 
     # ─── DARK POOL ───────────────────────────────────────────────────────────

@@ -28,11 +28,12 @@ async def _seed_watchlist_if_empty():
         db = SessionLocal()
         count = db.query(WatchlistItem).count()
         if count == 0:
-            from core.uw_fetcher import UWFetcher
+            from core.uw_fetcher import UWFetcher, classify_ticker
             uw = UWFetcher()
             tickers = await uw.get_active_tickers()
             for ticker in tickers[:15]:
-                item = WatchlistItem(ticker=ticker.upper(), active=True)
+                ticker = ticker.upper()
+                item = WatchlistItem(ticker=ticker, category=classify_ticker(ticker), active=True)
                 db.add(item)
             db.commit()
             logger.info(f"Watchlist seeded with {min(len(tickers), 15)} UW tickers")
@@ -51,6 +52,14 @@ def _ensure_schema():
     """
     try:
         inspector = inspect(engine)
+        if inspector.has_table("watchlist"):
+            watch_cols = {c["name"]: str(c["type"]).upper() for c in inspector.get_columns("watchlist")}
+            if "category" not in watch_cols:
+                with engine.connect() as conn:
+                    conn.execute(text("ALTER TABLE watchlist ADD COLUMN category VARCHAR(20) DEFAULT 'STOCK'"))
+                    conn.commit()
+                logger.info("watchlist.category agregado para filtros por categoria")
+
         if not inspector.has_table("alerts"):
             return
         cols = {c["name"]: str(c["type"]).upper() for c in inspector.get_columns("alerts")}
@@ -70,18 +79,27 @@ def _ensure_schema():
             return
 
         missing_columns = {
+            "category": "VARCHAR(20) DEFAULT 'STOCK'",
             "oi_growing": "BOOLEAN DEFAULT FALSE",
             "oi_change_pct": "FLOAT DEFAULT 0",
             "oi_days_growing": "INTEGER DEFAULT 0",
             "oi_today": "INTEGER",
             "oi_yesterday": "INTEGER",
+            "has_ladder": "BOOLEAN DEFAULT FALSE",
+            "ladder_strikes": "JSON",
+            "put_gaps": "JSON",
+            "target_strike": "FLOAT",
+            "repeated_flow": "BOOLEAN DEFAULT FALSE",
+            "flow_count": "INTEGER DEFAULT 0",
+            "accumulated_nominal": "FLOAT DEFAULT 0",
         }
         with engine.connect() as conn:
             for col, col_type in missing_columns.items():
                 if col not in cols:
                     conn.execute(text(f"ALTER TABLE alerts ADD COLUMN {col} {col_type}"))
-                    logger.info(f"alerts.{col} agregado para OI conviction tracking")
+                    logger.info(f"alerts.{col} agregado para scanner tape reading")
             conn.commit()
+
     except Exception as e:
         logger.warning(f"_ensure_schema fallo (no fatal): {e}")
 
@@ -108,12 +126,13 @@ async def lifespan(app: FastAPI):
             if watchlist_count == 0:
                 logger.info("Watchlist vacía — seeding automático...")
                 async def _seed():
-                    from core.uw_fetcher import UWFetcher
+                    from core.uw_fetcher import UWFetcher, classify_ticker
                     uw = UWFetcher()
                     tickers = await uw.get_active_tickers()
                     _db2 = SL()
                     for ticker in tickers[:15]:
-                        _db2.add(WatchlistItem(ticker=ticker, active=True))
+                        ticker = ticker.upper()
+                        _db2.add(WatchlistItem(ticker=ticker, category=classify_ticker(ticker), active=True))
                     _db2.commit()
                     _db2.close()
                 asyncio.create_task(_seed())
@@ -968,6 +987,9 @@ async def professional_dashboard():
         .panel-meta { color:var(--muted); font-size:12px; font-weight:700; white-space:nowrap; }
         .watchlist, .alerts, .stats { padding:16px; }
         .watchlist, .alerts { max-height:calc(100vh - 192px); overflow:auto; }
+        .category-filter { display:flex; gap:8px; padding:12px 16px 0; flex-wrap:wrap; }
+        .cat-btn { border:1px solid var(--line); border-radius:999px; background:rgba(201,168,76,.06); color:var(--muted); cursor:pointer; font-size:10px; font-weight:800; letter-spacing:.08em; padding:7px 9px; text-transform:uppercase; }
+        .cat-btn.active { color:var(--gold); background:rgba(201,168,76,.14); border-color:rgba(201,168,76,.44); }
         .watch-item, .alert-card, .stat-card, .market-card {
             border:1px solid rgba(255,255,255,.07); border-radius:14px; background:rgba(255,255,255,.028);
         }
@@ -988,6 +1010,11 @@ async def professional_dashboard():
         .phase.continuation { color:var(--green); background:rgba(39,209,127,.11); border-color:rgba(39,209,127,.32); }
         .phase.oi-soft { color:#f1c40f; background:rgba(241,196,15,.12); border-color:rgba(241,196,15,.3); }
         .phase.oi-strong { color:var(--green); background:rgba(39,209,127,.11); border-color:rgba(39,209,127,.32); }
+        .phase.ladder { color:var(--gold); background:rgba(201,168,76,.16); border-color:rgba(201,168,76,.48); }
+        .phase.repeated { color:var(--amber); background:rgba(232,146,26,.14); border-color:rgba(232,146,26,.36); }
+        .category-badge.stock { color:#93c5fd; background:rgba(96,165,250,.12); border-color:rgba(96,165,250,.32); }
+        .category-badge.etf { color:var(--amber); background:rgba(232,146,26,.14); border-color:rgba(232,146,26,.36); }
+        .category-badge.index { color:var(--red); background:rgba(255,92,92,.12); border-color:rgba(255,92,92,.32); }
         .tier.alert { color:var(--green); background:rgba(39,209,127,.11); border-color:rgba(39,209,127,.32); }
         .tier.premium { color:var(--amber); background:rgba(232,146,26,.14); border-color:rgba(232,146,26,.36); }
         .tier.livermore { color:var(--gold); background:rgba(201,168,76,.14); border-color:rgba(201,168,76,.42); }
@@ -1065,6 +1092,12 @@ async def professional_dashboard():
         <main>
             <section class="panel">
                 <div class="panel-head"><h2 class="panel-title">Watchlist</h2><span class="panel-meta" id="watchCount">0 activos</span></div>
+                <div class="category-filter">
+                    <button class="cat-btn active" type="button" data-category="ALL">TODOS</button>
+                    <button class="cat-btn" type="button" data-category="STOCK">STOCKS</button>
+                    <button class="cat-btn" type="button" data-category="ETF">ETFs</button>
+                    <button class="cat-btn" type="button" data-category="INDEX">ÍNDICES</button>
+                </div>
                 <div class="watchlist" id="watchlist"></div>
             </section>
 
@@ -1097,7 +1130,7 @@ async def professional_dashboard():
             watchlist: document.getElementById("watchlist"), watchCount: document.getElementById("watchCount"),
             lastUpdate: document.getElementById("lastUpdate"), lastScan: document.getElementById("lastScan"), etClock: document.getElementById("etClock")
         };
-        let latestAlerts = [], latestWatchlist = [], currentFilter = null, lastScanDate = null;
+        let latestAlerts = [], latestWatchlist = [], currentFilter = null, categoryFilter = "ALL", lastScanDate = null;
         function escapeHtml(value) { return String(value ?? "").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;").replaceAll("'","&#039;"); }
         function fmt(value, fallback = "--") { return value === null || value === undefined || value === "" ? fallback : value; }
         function money(value) { const n = Number(value); return Number.isFinite(n) && n > 0 ? "$" + n.toFixed(2) : "--"; }
@@ -1127,6 +1160,12 @@ async def professional_dashboard():
             const label = days >= 3 ? `OI ↑ ${days} días` : "OI ↑";
             return `<span class="phase ${cls}">${label}</span>`;
         }
+        function categoryBadge(category) {
+            const value = String(category || "STOCK").toUpperCase();
+            return `<span class="phase category-badge ${value.toLowerCase()}">${value}</span>`;
+        }
+        function ladderBadge(alert) { return alert.has_ladder ? `<span class="phase ladder">ESCALERA</span>` : ""; }
+        function repeatedBadge(alert) { return alert.repeated_flow ? `<span class="phase repeated">FLUJO REPETIDO</span>` : ""; }
         function toIBKR(raw) { const m = String(raw || "").match(/^([A-Z]+)(\\d{6})([CP])(\\d{8})$/); if (!m) return raw || ""; return m[1] + " " + m[2] + m[3] + " " + (parseInt(m[4]) / 1000).toString(); }
         async function copyIBKR(button) { const text = button.dataset.contract || ""; if (!text) return; await navigator.clipboard.writeText(text); button.textContent = "COPIADO"; setTimeout(() => { button.textContent = "COPIAR"; }, 1000); }
         async function getJson(url) { const response = await fetch(url, { cache:"no-store" }); if (!response.ok) throw new Error(`${response.status} ${response.statusText}`); return response.json(); }
@@ -1156,7 +1195,7 @@ async def professional_dashboard():
                 const ibkr = contract ? toIBKR(contract) : "N/A", direction = directionLabel(alert), dirClass = direction === "BEARISH" ? "bearish" : "bullish";
                 const signals = [alert.icc_phase ? `ICC ${alert.icc_phase}` : null, alert.regime, alert.session, alert.signal].filter(Boolean).join(" · ");
                 return `<article class="alert-card">
-                    <div class="alert-top"><div class="alert-title"><span class="ticker">${escapeHtml(alert.ticker)}</span><span class="tier ${tierClass(alert.tier)}">${tierLabel(alert.tier)}</span>${oiBadge(alert)}</div><div class="score-big">${score}<span>/100</span></div></div>
+                    <div class="alert-top"><div class="alert-title"><span class="ticker">${escapeHtml(alert.ticker)}</span>${categoryBadge(alert.category)}<span class="tier ${tierClass(alert.tier)}">${tierLabel(alert.tier)}</span>${oiBadge(alert)}${ladderBadge(alert)}${repeatedBadge(alert)}</div><div class="score-big">${score}<span>/100</span></div></div>
                     <div class="direction-line ${dirClass}"><span class="direction-arrow">${direction === "BEARISH" ? "↓" : "↑"}</span><span>${direction}</span></div>
                     <div class="contract-row"><span class="contract">${escapeHtml(fmt(ibkr,"N/A"))}</span><span class="score-num">${compactMoney(alert.nominal_value ?? alert.premium)}</span>${contract ? `<button class="copy-btn" data-contract="${escapeHtml(ibkr)}" onclick="copyIBKR(this)">COPIAR</button>` : ""}</div>
                     <div class="levels"><div class="level"><div class="level-label">Entry</div><div class="level-value">${money(alert.entry)}</div></div><div class="level"><div class="level-label">SL</div><div class="level-value">${money(alert.sl)}</div></div><div class="level"><div class="level-label">TP1</div><div class="level-value">${money(alert.tp1)}</div></div><div class="level"><div class="level-label">TP2</div><div class="level-value">${money(alert.tp2)}</div></div></div>
@@ -1182,19 +1221,25 @@ async def professional_dashboard():
             const scores = new Map(), phases = new Map();
             latestAlerts.forEach((a) => { const t = String(a.ticker || "").toUpperCase(); if (t && !scores.has(t)) scores.set(t, scoreValue(a.score)); if (t && !phases.has(t)) phases.set(t, phaseLabel(a.icc_phase)); });
             let list = Array.isArray(items) ? items : [];
-            if (!list.length && latestAlerts.length) list = latestAlerts.map((a) => ({ ticker:a.ticker, current_price:a.entry, day_change_pct:0, icc_phase:a.icc_phase, score:a.score }));
+            if (!list.length && latestAlerts.length) list = latestAlerts.map((a) => ({ ticker:a.ticker, category:a.category, current_price:a.entry, day_change_pct:0, icc_phase:a.icc_phase, score:a.score }));
+            if (categoryFilter !== "ALL") list = list.filter((item) => String(item.category || "STOCK").toUpperCase() === categoryFilter);
             els.watchCount.textContent = `${list.length} activos`;
             if (!list.length) { els.watchlist.innerHTML = `<div class="empty">Watchlist vacía. Agrega tickers desde la API para monitorearlos aquí.</div>`; return; }
             els.watchlist.innerHTML = list.map((item) => {
                 const ticker = String(item.ticker || "N/A").toUpperCase(), score = scoreValue(item.score ?? scores.get(ticker) ?? 0), phase = phaseLabel(item.icc_phase ?? phases.get(ticker));
                 const change = Number(item.day_change_pct ?? 0), changeClass = change > 0 ? "positive" : change < 0 ? "negative" : "neutral";
-                return `<div class="watch-item ${currentFilter === ticker ? "active" : ""}" onclick="filterTicker('${escapeHtml(ticker)}')"><div class="watch-top"><span class="ticker">${escapeHtml(ticker)}</span><span class="phase ${phase.toLowerCase()}">${phase}</span></div>
+                return `<div class="watch-item ${currentFilter === ticker ? "active" : ""}" onclick="filterTicker('${escapeHtml(ticker)}')"><div class="watch-top"><span class="ticker">${escapeHtml(ticker)}</span><span>${categoryBadge(item.category)} <span class="phase ${phase.toLowerCase()}">${phase}</span></span></div>
                     <div class="watch-price-row"><span class="price">${money(item.current_price)}</span><span class="change ${changeClass}">${pct(change)}</span></div>
                     <div class="score-line"><span class="score-label">Score Livermore</span><span class="score-num">${score}/100</span></div><div class="progress"><div class="progress-fill" style="width:${score}%"></div></div></div>`;
             }).join("");
         }
         function filterTicker(ticker) { currentFilter = ticker; renderAlerts(); renderWatchlist(latestWatchlist); }
         els.clearFilter.addEventListener("click", () => { currentFilter = null; renderAlerts(); renderWatchlist(latestWatchlist); });
+        document.querySelectorAll(".cat-btn").forEach((btn) => btn.addEventListener("click", () => {
+            categoryFilter = btn.dataset.category || "ALL";
+            document.querySelectorAll(".cat-btn").forEach((item) => item.classList.toggle("active", item === btn));
+            renderWatchlist(latestWatchlist);
+        }));
         els.themeToggle.addEventListener("click", () => {
             document.body.classList.toggle("light"); const light = document.body.classList.contains("light");
             els.themeToggle.textContent = light ? "Modo noche" : "Modo día"; localStorage.setItem("livermore-theme", light ? "light" : "dark");
@@ -1265,12 +1310,15 @@ async def backtesting_page(db: Session = Depends(get_db)):
         <tr>
             <td>{escape(_format_et(a.created_at))}</td>
             <td class="ticker">{escape(a.ticker or "--")}</td>
+            <td>{escape(a.category or "STOCK")}</td>
             <td>
                 <a class="ibkr-contract" data-raw="{escape(a.contract or '', quote=True)}" data-ticker="{escape(a.ticker or '', quote=True)}" href="#" target="_blank" rel="noopener">{escape(a.contract or "--")}</a>
                 <button class="copy-btn" data-contract="" onclick="copyIBKR(this)" title="Copiar contrato IBKR">📋</button>
             </td>
             <td>${round((a.premium or 0) / 1_000_000, 1)}M</td>
             <td>{escape(_format_oi_trend(a))}</td>
+            <td>{'SI' if a.has_ladder else '--'}</td>
+            <td>{'SI' if a.repeated_flow else '--'}{f' x{a.flow_count}' if a.repeated_flow and a.flow_count else ''}</td>
             <td>{a.score_total or 0}/100</td>
             <td>{escape(a.icc_phase or "--")}</td>
             <td class="pnl {'win' if (a.pnl_pct or 0) > 0 else 'loss' if (a.pnl_pct or 0) < 0 else ''}">{'+' if (a.pnl_pct or 0) > 0 else ''}{round(a.pnl_pct, 2) if a.pnl_pct is not None else '--'}{'%' if a.pnl_pct is not None else ''}</td>
@@ -1350,10 +1398,10 @@ async def backtesting_page(db: Session = Depends(get_db)):
         <table>
             <thead>
                 <tr>
-                    <th>Fecha Entrada</th><th>Ticker</th><th>Contrato</th><th>Nominal</th><th>OI Trend</th><th>Score</th><th>Dirección</th><th>P&L%</th><th>Status</th>
+                    <th>Fecha Entrada</th><th>Ticker</th><th>Categoría</th><th>Contrato</th><th>Nominal</th><th>OI Trend</th><th>Escalera</th><th>Flujo Repetido</th><th>Score</th><th>Dirección</th><th>P&L%</th><th>Status</th>
                 </tr>
             </thead>
-            <tbody>""" + (rows or '<tr><td colspan="9">No hay backtests cargados.</td></tr>') + """</tbody>
+            <tbody>""" + (rows or '<tr><td colspan="12">No hay backtests cargados.</td></tr>') + """</tbody>
         </table>
     </section>
     <script>
@@ -1397,6 +1445,7 @@ def _serialize_alert(a: Alert) -> dict:
         "id":        a.id,
         "ticker":    a.ticker,
         "tier":      a.tier,
+        "category":  a.category or "STOCK",
         "score":     a.score_total,
         "direction": _infer_direction(a),
         "icc_phase": a.icc_phase,
@@ -1422,6 +1471,13 @@ def _serialize_alert(a: Alert) -> dict:
             "today_oi": a.oi_today,
             "yesterday_oi": a.oi_yesterday,
         },
+        "has_ladder": bool(a.has_ladder),
+        "ladder_strikes": a.ladder_strikes or [],
+        "put_gaps": a.put_gaps or [],
+        "target_strike": a.target_strike,
+        "repeated_flow": bool(a.repeated_flow),
+        "flow_count": a.flow_count or 0,
+        "accumulated_nominal": a.accumulated_nominal or a.premium or 0,
         "signal":    a.signal_summary,
         "regime":    a.regime,
         "session":   a.market_session,
@@ -1788,8 +1844,14 @@ async def get_watchlist(db: Session = Depends(get_db)):
         return 0
 
     result = []
+    try:
+        from core.uw_fetcher import classify_ticker
+    except Exception:
+        classify_ticker = lambda value: "STOCK"
     for i in items:
         ticker = i.ticker.upper()
+        inferred_category = classify_ticker(ticker)
+        category = inferred_category if inferred_category != "STOCK" else (i.category or inferred_category)
         screener_row = screener_by_ticker.get(ticker, {})
         latest = (
             db.query(Alert)
@@ -1807,6 +1869,7 @@ async def get_watchlist(db: Session = Depends(get_db)):
         result.append({
             "id": i.id,
             "ticker": ticker,
+            "category": category,
             "notes": i.notes,
             "current_price": current_price,
             "day_change_pct": change_pct,
@@ -1817,8 +1880,10 @@ async def get_watchlist(db: Session = Depends(get_db)):
 
 
 @app.post("/api/watchlist")
-async def add_watchlist(ticker: str, notes: str = "", db: Session = Depends(get_db)):
-    i = WatchlistItem(ticker=ticker.upper(), notes=notes)
+async def add_watchlist(ticker: str, notes: str = "", category: Optional[str] = None, db: Session = Depends(get_db)):
+    from core.uw_fetcher import classify_ticker
+    ticker = ticker.upper()
+    i = WatchlistItem(ticker=ticker, category=(category or classify_ticker(ticker)).upper(), notes=notes)
     db.add(i)
     db.commit()
     return {"ok": True, "id": i.id}

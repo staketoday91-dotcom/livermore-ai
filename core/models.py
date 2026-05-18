@@ -26,6 +26,7 @@ class Alert(Base):
     asset_type      = Column(String(20))        # STOCK / OPTION / FUTURE
     mode            = Column(String(20))        # SWING / DAY_TRADE / PRIMA / LONG_TERM
     tier            = Column(Integer, default=1)
+    category        = Column(String(20), default="STOCK")  # STOCK / ETF / INDEX
 
     # Score breakdown
     score_total     = Column(Integer)
@@ -57,6 +58,13 @@ class Alert(Base):
     oi_days_growing = Column(Integer, default=0)
     oi_today        = Column(Integer)
     oi_yesterday    = Column(Integer)
+    has_ladder      = Column(Boolean, default=False)
+    ladder_strikes  = Column(JSON, default=list)
+    put_gaps        = Column(JSON, default=list)
+    target_strike   = Column(Float)
+    repeated_flow   = Column(Boolean, default=False)
+    flow_count      = Column(Integer, default=0)
+    accumulated_nominal = Column(Float, default=0)
 
     # Dark Pool
     dp_print_price  = Column(Float)
@@ -95,6 +103,7 @@ class WatchlistItem(Base):
 
     id          = Column(Integer, primary_key=True)
     ticker      = Column(String(10), nullable=False)
+    category    = Column(String(20), default="STOCK")  # STOCK / ETF / INDEX
     added_by    = Column(String(50), default="system")
     priority    = Column(Integer, default=1)
     notes       = Column(Text)

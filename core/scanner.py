@@ -11,7 +11,7 @@ import pytz
 
 from core.icc_engine import ICCDetector, RegimeDetector, ICCPhase, ICCDirection
 from core.scorer import LivermoreScorer, DarkPoolSignal, OptionsFlowSignal, MacroContext
-from core.uw_fetcher import UWFetcher
+from core.uw_fetcher import UWFetcher, classify_ticker
 from core.models import Alert, WatchlistItem, SessionLocal
 
 logger = logging.getLogger("livermore.scanner")
@@ -86,6 +86,7 @@ class LivermoreScanner:
 
         current_price = ticker_data.get("prev_close", 0)
         iv_rank       = ticker_data.get("iv_rank", 50)
+        category      = classify_ticker(ticker)
         if not current_price:
             return None
 
@@ -101,6 +102,7 @@ class LivermoreScanner:
 
         # ─── 5. GEX ───────────────────────────────────────────
         gex = await self.uw.get_gex(ticker)
+        chain_map = await self.uw.get_option_chain_map(ticker)
 
         # ─── 6. Earnings DTE ──────────────────────────────────
         earnings_dte = await self.uw.get_earnings_dte(ticker)
@@ -164,7 +166,7 @@ class LivermoreScanner:
         opt_signal = None
         eligible_flow_alerts = [
             flow for flow in flow_alerts
-            if float(flow.get("nominal_value", 0) or 0) >= 500_000
+            if float(flow.get("nominal_value", 0) or 0) >= LivermoreScorer.min_nominal_for_category(category)
         ]
         if eligible_flow_alerts:
             best = max(eligible_flow_alerts, key=lambda f: float(f.get("nominal_value", 0) or 0))
@@ -189,6 +191,9 @@ class LivermoreScanner:
                 iv_rank=iv_rank,
                 expiration_dte=30,
                 contract=best.get("option_chain", ""),
+                repeated_flow=bool(best.get("repeated_flow")),
+                flow_count=int(best.get("flow_count", 0) or 0),
+                accumulated_nominal=float(best.get("accumulated_nominal", nominal_value) or nominal_value),
             )
 
         # ─── 11. Macro context ────────────────────────────────
@@ -226,6 +231,8 @@ class LivermoreScanner:
             adx=adx,
             regime=regime,
             oi_data=oi_data,
+            category=category,
+            chain_map=chain_map,
         )
 
         # ─── 15. Contrato recomendado del flow alert ──────────
@@ -240,6 +247,7 @@ class LivermoreScanner:
             "ticker":     ticker,
             "score":      score_result.total,
             "tier":       score_result.tier,
+            "category":   category,
             "direction":  direction.value,
             "icc_phase":  icc_phase.value,
             "icc_signal": "net_premium_continuation",
@@ -256,6 +264,10 @@ class LivermoreScanner:
             "premium":    nominal_value,
             "nominal_value": nominal_value,
             "oi_data": oi_data,
+            "chain_map": chain_map,
+            "repeated_flow": bool(best.get("repeated_flow")) if eligible_flow_alerts else False,
+            "flow_count": int(best.get("flow_count", 0) or 0) if eligible_flow_alerts else 0,
+            "accumulated_nominal": float(best.get("accumulated_nominal", 0) or 0) if eligible_flow_alerts else 0,
             "reason":     score_result.reason,
             "score_breakdown": {
                 "icc":      score_result.icc,
@@ -297,6 +309,7 @@ class LivermoreScanner:
                 ticker=result["ticker"],
                 asset_type="OPTION" if result.get("contract") else "STOCK",
                 mode="SWING",
+                category=result.get("category", "STOCK"),
                 score_total=result["score"],
                 score_icc=result["score_breakdown"]["icc"],
                 score_darkpool=result["score_breakdown"]["dark_pool"],
@@ -313,6 +326,13 @@ class LivermoreScanner:
                 oi_days_growing=result.get("oi_data", {}).get("days_growing", 0),
                 oi_today=result.get("oi_data", {}).get("today_oi"),
                 oi_yesterday=result.get("oi_data", {}).get("yesterday_oi"),
+                has_ladder=bool(result.get("chain_map", {}).get("has_ladder")),
+                ladder_strikes=result.get("chain_map", {}).get("ladder_strikes", []),
+                put_gaps=result.get("chain_map", {}).get("put_gaps", []),
+                target_strike=result.get("chain_map", {}).get("target_strike"),
+                repeated_flow=bool(result.get("repeated_flow")),
+                flow_count=result.get("flow_count", 0),
+                accumulated_nominal=result.get("accumulated_nominal", 0),
                 signal_summary=result["reason"],
                 icc_phase=result["icc_phase"],
                 icc_signal=result["icc_signal"],

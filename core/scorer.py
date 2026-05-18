@@ -33,6 +33,9 @@ class OptionsFlowSignal:
     iv_rank:        float
     expiration_dte: int
     contract:       str
+    repeated_flow:  bool = False
+    flow_count:     int = 0
+    accumulated_nominal: float = 0
     score:          int = 0
 
 
@@ -86,6 +89,25 @@ class LivermoreScorer:
 
     NY_TZ = pytz.timezone("America/New_York")
 
+    FLOW_THRESHOLDS = {
+        "STOCK": ((500_000, 1_000_000, 5), (1_000_000, 3_000_000, 10), (3_000_000, 10_000_000, 18), (10_000_000, float("inf"), 25)),
+        "ETF": ((1_000_000, 3_000_000, 5), (3_000_000, 5_000_000, 10), (5_000_000, 10_000_000, 18), (10_000_000, float("inf"), 25)),
+        "INDEX": ((3_000_000, 5_000_000, 5), (5_000_000, 10_000_000, 12), (10_000_000, 50_000_000, 20), (50_000_000, float("inf"), 25)),
+    }
+
+    @classmethod
+    def min_nominal_for_category(cls, category: str) -> float:
+        thresholds = cls.FLOW_THRESHOLDS.get((category or "STOCK").upper(), cls.FLOW_THRESHOLDS["STOCK"])
+        return thresholds[0][0]
+
+    @classmethod
+    def flow_score_for_nominal(cls, nominal: float, category: str) -> int:
+        thresholds = cls.FLOW_THRESHOLDS.get((category or "STOCK").upper(), cls.FLOW_THRESHOLDS["STOCK"])
+        for low, high, score in thresholds:
+            if low <= nominal < high:
+                return score
+        return 0
+
     def score(
         self,
         ticker:         str,
@@ -101,6 +123,8 @@ class LivermoreScorer:
         adx:            float,
         regime:         str,
         oi_data:        Optional[dict] = None,
+        category:       str = "STOCK",
+        chain_map:      Optional[dict] = None,
     ) -> LivermoreScorecardResult:
 
         score_icc       = 0
@@ -161,21 +185,11 @@ class LivermoreScorer:
         if options_flow:
             opt = options_flow
 
-            nominal = opt.nominal_value
-            if nominal < 500_000:
-                score_opt = 0
-            elif nominal < 1_000_000:
-                score_opt = 5
-                reasons.append(f"Options flow ${nominal/1_000_000:.1f}M")
-            elif nominal < 3_000_000:
-                score_opt = 10
-                reasons.append(f"Options flow interesante ${nominal/1_000_000:.1f}M")
-            elif nominal < 10_000_000:
-                score_opt = 18
-                reasons.append(f"Options flow institucional ${nominal/1_000_000:.1f}M")
-            else:
-                score_opt = 25
-                reasons.append(f"Ballena confirmada ${nominal/1_000_000:.1f}M")
+            category = (category or "STOCK").upper()
+            nominal = opt.accumulated_nominal or opt.nominal_value
+            score_opt = self.flow_score_for_nominal(nominal, category)
+            if score_opt:
+                reasons.append(f"Options flow {category} ${nominal/1_000_000:.1f}M")
 
             oi = oi_data or {}
             if oi.get("oi_growing"):
@@ -193,8 +207,29 @@ class LivermoreScorer:
                     multiplier = 1.0
                 score_opt = min(25, round(score_opt * multiplier))
 
+            if opt.repeated_flow:
+                if opt.flow_count >= 5:
+                    score_opt = min(25, round(score_opt * 1.6))
+                    reasons.append(f"Flujo repetido x{opt.flow_count} en mismo contrato")
+                elif opt.flow_count >= 3:
+                    score_opt = min(25, round(score_opt * 1.3))
+                    reasons.append(f"Flujo repetido x{opt.flow_count}")
+
+            if opt.accumulated_nominal > 2_000_000:
+                reasons.append(f"Acumulacion en contrato ${opt.accumulated_nominal/1_000_000:.1f}M")
+
             contract = opt.contract
             score_opt = min(score_opt, 25)
+
+        chain_bonus = 0
+        chain = chain_map or {}
+        if chain.get("has_ladder"):
+            chain_bonus += 5
+            strikes = "/".join(str(s) for s in chain.get("ladder_strikes", [])[:3])
+            reasons.append(f"Escalera institucional detectada en strikes {strikes}")
+        if chain.get("put_gaps"):
+            chain_bonus += 3
+            reasons.append("Gaps en puts confirman direccion")
 
         # ─── MACRO CONTEXT ───────────────────────────────────
         if macro.has_fomc or macro.has_cpi or macro.has_nfp:
@@ -223,7 +258,7 @@ class LivermoreScorer:
         score_macro = max(score_macro, -20)
 
         # ─── TOTAL ───────────────────────────────────────────
-        total = score_icc + score_dp + score_opt + score_macro + score_prepost
+        total = score_icc + score_dp + score_opt + score_macro + score_prepost + chain_bonus
         total = max(0, min(total, 100))
 
         # ─── DECISION ────────────────────────────────────────
