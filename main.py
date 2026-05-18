@@ -1,6 +1,7 @@
 import os
 import logging
 import asyncio
+import re
 from html import escape
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -23,6 +24,7 @@ logger = logging.getLogger("livermore")
 
 is_scanning = False
 last_scan_started_at: Optional[datetime] = None
+_OCC_RE = re.compile(r"^([A-Z]+)\d{6}[CP]\d{8}$")
 
 
 async def _seed_watchlist_if_empty():
@@ -109,12 +111,41 @@ def _ensure_schema():
         logger.warning(f"_ensure_schema fallo (no fatal): {e}")
 
 
+def _purge_contaminated_alerts():
+    db = None
+    try:
+        db = SessionLocal()
+        bad_alerts = []
+        for alert in db.query(Alert).filter(Alert.contract.isnot(None), Alert.contract != "").all():
+            contract = (alert.contract or "").strip().upper()
+            ticker = (alert.ticker or "").strip().upper()
+            match = _OCC_RE.match(contract)
+            if not match or match.group(1) != ticker:
+                bad_alerts.append(alert)
+
+        for alert in bad_alerts:
+            logger.warning(f"Alert {alert.id} contaminada: ticker={alert.ticker} contract={alert.contract}")
+            db.delete(alert)
+
+        if bad_alerts:
+            db.commit()
+            logger.warning(f"Alertas contaminadas eliminadas: {len(bad_alerts)}")
+        else:
+            db.rollback()
+    except Exception as e:
+        logger.warning(f"purge contaminated alerts fallo (no fatal): {e}")
+    finally:
+        if db:
+            db.close()
+
+
 # ─── Lifespan — arranca bot + scanner ─────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
         _ensure_schema()
         Base.metadata.create_all(bind=engine)
+        _purge_contaminated_alerts()
         # Auto-backfill y seed watchlist si DB vacía
         try:
             from core.models import Alert, WatchlistItem, SessionLocal as SL

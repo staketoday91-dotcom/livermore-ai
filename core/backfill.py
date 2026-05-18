@@ -3,6 +3,7 @@ Backfill historico desde Unusual Whales para senales BACKTEST.
 """
 import asyncio
 import os
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -20,6 +21,9 @@ from core.uw_fetcher import UWFetcher, classify_ticker  # noqa: E402
 
 UW_BASE = "https://api.unusualwhales.com/api"
 UW_TOKEN = os.getenv("UNUSUAL_WHALES_TOKEN", "")
+_OCC_RE = re.compile(r"^([A-Z]+)\d{6}[CP]\d{8}$")
+INDEX_ETFS = {"SPY", "QQQ", "IWM", "DIA"}
+MEGA_CAPS = {"AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "GOOG", "META", "TSLA", "AVGO"}
 
 
 def _headers() -> dict[str, str]:
@@ -62,6 +66,15 @@ def _ticker(data: dict) -> str:
     return str(_pick(data, "ticker", "underlying_symbol", "symbol", default="")).upper()
 
 
+def _contract_belongs_to_ticker(contract: str, ticker: str) -> bool:
+    match = _OCC_RE.match((contract or "").strip().upper())
+    return bool(match) and match.group(1) == ticker.upper()
+
+
+def _flow_belongs_to_ticker(flow_obj: dict, ticker: str) -> bool:
+    return _contract_belongs_to_ticker(_contract(flow_obj), ticker)
+
+
 def _contract(data: dict) -> str:
     direct = _pick(data, "option_chain", "contract", "option_symbol", "symbol", default="")
     if direct:
@@ -91,6 +104,20 @@ def _direction(data: dict) -> str:
     if "put" in option_type or "bear" in sentiment:
         return "BEARISH"
     return "BULLISH"
+
+
+def _price_levels(entry: float, direction: str, ticker: str) -> tuple[float, float, float]:
+    ticker = ticker.upper()
+    if ticker in INDEX_ETFS:
+        sl_pct, tp1_pct, tp2_pct = 0.005, 0.010, 0.018
+    elif ticker in MEGA_CAPS:
+        sl_pct, tp1_pct, tp2_pct = 0.012, 0.025, 0.040
+    else:
+        sl_pct, tp1_pct, tp2_pct = 0.020, 0.040, 0.065
+
+    if direction == "BULLISH":
+        return entry * (1 - sl_pct), entry * (1 + tp1_pct), entry * (1 + tp2_pct)
+    return entry * (1 + sl_pct), entry * (1 - tp1_pct), entry * (1 - tp2_pct)
 
 
 def _nominal_value(data: dict) -> float:
@@ -343,6 +370,9 @@ def _score_backtest(
     iv_rank = _float(_pick(data, "iv_rank", default=50), 50)
     dte = _int(_pick(data, "dte", "days_to_expiration", default=30), 30)
     direction = _direction(data)
+    ticker = _ticker(data)
+    entry = _float(_pick(data, "underlying_price", "spot_price", "price", default=0))
+    stop_loss, target1, target2 = _price_levels(entry, direction, ticker) if entry else (0, 0, 0)
 
     icc_score = 25
     if nominal_value >= 500_000:
@@ -371,13 +401,13 @@ def _score_backtest(
     macro = MacroContext(market_session="BACKTEST", vix_level=15.0)
 
     result = LivermoreScorer().score(
-        ticker=_ticker(data),
+        ticker=ticker,
         icc_score=icc_score,
         icc_direction=direction,
-        entry_price=_float(_pick(data, "underlying_price", "spot_price", "price", default=0)),
-        stop_loss=0,
-        target1=0,
-        target2=0,
+        entry_price=entry,
+        stop_loss=stop_loss,
+        target1=target1,
+        target2=target2,
         dark_pool=dark_pool,
         options_flow=options,
         macro=macro,
@@ -459,13 +489,15 @@ async def main():
     async with httpx.AsyncClient(timeout=30) as client:
         for row in rows:
             ticker = _ticker(row)
+            contract = _contract(row)
+            if not ticker or not _contract_belongs_to_ticker(contract, ticker):
+                continue
             if ticker and ticker not in dark_pool_cache:
                 dark_pool_cache[ticker] = await fetch_dark_pool(client, ticker)
             if ticker and ticker not in oi_cache:
                 oi_cache[ticker] = await fetch_oi_change(client, ticker)
             if ticker and ticker not in chain_cache:
                 chain_cache[ticker] = await fetch_option_chain_map(client, ticker)
-            contract = _contract(row)
             if contract and contract not in historic_cache:
                 historic_cache[contract] = await fetch_option_historic(client, contract)
             if contract and contract not in contract_price_cache:
@@ -485,6 +517,10 @@ async def main():
                 continue
 
             if not ticker:
+                continue
+            contract = _contract(row)
+            if not _contract_belongs_to_ticker(contract, ticker):
+                print(f"Backtest skip: contrato {contract} no pertenece a {ticker}")
                 continue
 
             current_price = _float(_pick(row, "underlying_price", "spot_price", "price", default=0))

@@ -5,6 +5,7 @@ Alertas automaticas, mensajes diarios, reportes
 import os
 import logging
 import asyncio
+import re
 from datetime import datetime, time
 import pytz
 import discord
@@ -12,6 +13,20 @@ from discord.ext import commands, tasks
 
 logger = logging.getLogger("livermore.discord")
 NY_TZ  = pytz.timezone("America/New_York")
+_OCC_RE = re.compile(r"^([A-Z]+)\d{6}[CP]\d{8}$")
+
+
+def _assert_contract_belongs(ticker: str, contract: str) -> bool:
+    if not contract:
+        return True
+    match = _OCC_RE.match(contract.strip().upper())
+    if not match or match.group(1) != ticker.upper():
+        logger.error(
+            f"CONTRACT MISMATCH AT PUBLISH: "
+            f"ticker={ticker} contract={contract} — SKIPPING"
+        )
+        return False
+    return True
 
 # ─── Channel IDs ─────────────────────────────────────────────────────────────
 GUILD_ID         = int(os.getenv("DISCORD_GUILD_ID",         "0"))
@@ -72,38 +87,110 @@ class LivermoreBot(commands.Bot):
         tier     = result.get("tier", "ALERT")
         score    = result.get("score", 0)
         ticker   = result.get("ticker", "")
+        category = result.get("category", "STOCK")
         contract = result.get("contract", "")
         entry    = result.get("entry", 0)
         sl       = result.get("stop_loss", 0)
         tp1      = result.get("target1", 0)
         tp2      = result.get("target2", 0)
-        reason   = result.get("reason", "")
         direction = result.get("direction", "BULLISH")
         breakdown = result.get("score_breakdown", {})
         session  = result.get("session", "REGULAR")
         regime   = result.get("regime", "")
+        nominal  = result.get("nominal_value") or result.get("accumulated_nominal") or result.get("premium") or 0
+        oi_data  = result.get("oi_data") or {}
+        chain_map = result.get("chain_map") or {}
+        macro_calendar = result.get("macro_calendar") or {}
+        delta = result.get("delta", 0.50)
+        repeated_flow = bool(result.get("repeated_flow"))
+        flow_count = int(result.get("flow_count", 0) or 0)
+        is_single_leg = result.get("is_single_leg", True)
 
         now_et = datetime.now(NY_TZ).strftime("%I:%M %p ET")
+        if not _assert_contract_belongs(ticker, contract):
+            return
 
-        # Color por tier
-        color = {
-            "LIVERMORE": 0xD4A832,   # dorado
-            "PREMIUM":   0xE8921A,   # amber
-            "ALERT":     0x4A9E6B,   # verde
-        }.get(tier, 0x4A9E6B)
+        def money_compact(value) -> str:
+            try:
+                n = float(value or 0)
+            except (TypeError, ValueError):
+                n = 0
+            if n >= 1_000_000:
+                return f"${n / 1_000_000:.1f}M".replace(".0M", "M")
+            if n >= 1_000:
+                return f"${n / 1_000:.0f}K"
+            return f"${n:.0f}" if n > 0 else "--"
+
+        def price(value) -> str:
+            try:
+                return f"${float(value):.2f}"
+            except (TypeError, ValueError):
+                return "--"
+
+        def format_contract(raw: str) -> str:
+            import re
+            match = re.match(r"^([A-Z]+)(\d{6})([CP])(\d{8})$", raw or "")
+            if not match:
+                return raw or "--"
+            symbol, expiry, cp, strike_raw = match.groups()
+            strike = (int(strike_raw) / 1000)
+            strike_text = f"{strike:g}"
+            return f"{symbol} {expiry}{cp} {strike_text}"
+
+        def delta_zone(value) -> str:
+            try:
+                d = abs(float(value if value is not None else 0.50))
+            except (TypeError, ValueError):
+                d = 0.50
+            if 0.30 <= d <= 0.70:
+                zone = "zona conviccion"
+            elif 0.15 <= d < 0.30:
+                zone = "OTM moderado"
+            elif d < 0.15:
+                zone = "OTM extremo"
+            else:
+                zone = "deep ITM / posible hedge"
+            return f"Δ {d:.2f} ({zone})"
+
+        def macro_text() -> str:
+            if macro_calendar.get("has_event_today"):
+                events = ", ".join(macro_calendar.get("events_today", [])[:2]) or "Evento macro"
+                return f"⚠️ EVENTO HOY: {events}"
+            if macro_calendar.get("has_event_tomorrow"):
+                events = ", ".join(macro_calendar.get("events_tomorrow", [])[:2]) or "Evento macro"
+                return f"⚡ EVENTO MAÑANA: {events}"
+            return "✅ Sin eventos"
+
+        def oi_text() -> str:
+            if not oi_data.get("oi_growing"):
+                return "Sin datos OI"
+            days = int(oi_data.get("days_growing", 0) or 0)
+            return f"↑ {days} días consecutivos" if days > 0 else "↑ OI creciendo"
 
         # Emoji por direccion
         dir_emoji = "🟢" if direction == "BULLISH" else "🔴"
-        dir_text  = "ALCISTA" if direction == "BULLISH" else "BAJISTA"
+        dir_text  = "BULLISH" if direction == "BULLISH" else "BEARISH"
+        color = 0xC0392B if direction == "BEARISH" else {
+            "LIVERMORE": 0xC9A84C,
+            "PREMIUM":   0xE8921A,
+            "ALERT":     0x2ECC71,
+        }.get(tier, 0x2ECC71)
 
-        # Score bars
-        def bar(val, max_val):
-            filled = round((val / max_val) * 8)
-            return "█" * filled + "░" * (8 - filled)
+        contract_text = format_contract(contract)
+        ladder_strikes = chain_map.get("ladder_strikes", []) or []
+        ladder_text = (
+            f"✓ Detectada en strikes {'/'.join(str(s) for s in ladder_strikes[:3])}"
+            if chain_map.get("has_ladder") else "No detectada"
+        )
+        repeated_text = (
+            f"✓ {flow_count} transacciones acumuladas"
+            if repeated_flow else "Flujo único"
+        )
+        leg_text = "SINGLE LEG ✓" if is_single_leg else "MULTI-LEG ⚠️"
 
         # ─── EMBED PRINCIPAL ─────────────────────────────────────────────────
         embed = discord.Embed(
-            title=f"{dir_emoji} {ticker} — Score {score}/100",
+            title=f"{dir_emoji} {dir_text} — {ticker} {category} | Score {score}/100 | {tier}",
             color=color,
             timestamp=datetime.now(NY_TZ)
         )
@@ -112,44 +199,38 @@ class LivermoreBot(commands.Bot):
 
         if contract:
             embed.add_field(
-                name="Contrato recomendado",
-                value=f"```{contract}```",
+                name="Contrato",
+                value=f"**{contract_text}** | Nominal **{money_compact(nominal)}**",
                 inline=False
             )
 
         embed.add_field(
-            name="Niveles",
+            name="Señales activas",
             value=(
-                f"```\n"
-                f"Entrada:   ${entry:.2f}\n"
-                f"Stop Loss: ${sl:.2f}\n"
-                f"Target 1:  ${tp1:.2f}\n"
-                f"Target 2:  ${tp2:.2f}\n"
-                f"```"
+                f"• Valor nominal: **{money_compact(nominal)}** (threshold institucional)\n"
+                f"• OI: **{oi_text()}**\n"
+                f"• Tipo: **{leg_text}**\n"
+                f"• Delta: **{delta_zone(delta)}**\n"
+                f"• Escalera: **{ladder_text}**\n"
+                f"• Flujo repetido: **{repeated_text}**\n"
+                f"• Macro: **{macro_text()}**"
             ),
-            inline=True
+            inline=False
+        )
+
+        embed.add_field(
+            name="Niveles",
+            value=f"Entry: **{price(entry)}** | SL: **{price(sl)}** | TP1: **{price(tp1)}** | TP2: **{price(tp2)}**",
+            inline=False
         )
 
         embed.add_field(
             name="Score breakdown",
-            value=(
-                f"```\n"
-                f"ICC        {bar(breakdown.get('icc', 0), 35)} {breakdown.get('icc', 0)}/35\n"
-                f"Dark Pool  {bar(breakdown.get('dark_pool', 0), 30)} {breakdown.get('dark_pool', 0)}/30\n"
-                f"Flow       {bar(breakdown.get('options', 0), 25)} {breakdown.get('options', 0)}/25\n"
-                f"Macro      {bar(max(breakdown.get('macro', 0), 0), 10)} {breakdown.get('macro', 0)}/10\n"
-                f"```"
-            ),
-            inline=True
-        )
-
-        embed.add_field(
-            name="Senales activas",
-            value=reason[:200] if reason else "—",
+            value=f"ICC: **{breakdown.get('icc', 0)}/35** | Dark Pool: **{breakdown.get('dark_pool', 0)}/30** | Flow: **{breakdown.get('options', 0)}/25** | Macro: **{breakdown.get('macro', 0)}/10**",
             inline=False
         )
 
-        embed.set_footer(text=f"Sesion: {session} | Regimen: {regime} | {now_et} | ID #{alert_id}")
+        embed.set_footer(text=f"Sesión: {session} | Régimen: {regime} | ID: #{alert_id} | {now_et}")
 
         # ─── ENVIAR A CANALES DEL TIER ────────────────────────────────────────
         channels_to_notify = TIER_CHANNELS.get(tier, [TIER1_CH])
@@ -166,13 +247,12 @@ class LivermoreBot(commands.Bot):
         free_ch = self._get_channel(FREE_CH)
         if free_ch:
             teaser = discord.Embed(
-                title=f"{dir_emoji} Senal detectada — {ticker}",
+                title=f"{dir_emoji} Señal detectada — {ticker} | Score: {score}/100 | Tier: ALERT",
                 description=(
-                    f"Score: **{score}/100** | Tier: **{tier}** | {dir_text}\n\n"
-                    f"*Contrato y niveles disponibles para suscriptores.*\n"
-                    f"Upgrade en whop.com/livermore-ai"
+                    "Contrato y niveles disponibles para suscriptores. "
+                    "Upgrade en whop.com/livermore-ai"
                 ),
-                color=0x2a2a2a
+                color=0x2ECC71
             )
             teaser.set_footer(text=f"Livermore AI | {now_et}")
             try:
@@ -183,6 +263,9 @@ class LivermoreBot(commands.Bot):
     # ─── WIN ANNOUNCEMENT ────────────────────────────────────────────────────
     async def send_victory(self, ticker: str, contract: str, entry: float,
                            exit_price: float, pnl_pct: float, alert_id: int = 0):
+        if not _assert_contract_belongs(ticker, contract):
+            return
+
         ch = self._get_channel(VICTORIES_CH)
         if not ch:
             return

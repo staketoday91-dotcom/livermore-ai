@@ -5,7 +5,8 @@ Corre cada 5 min en market hours
 """
 import asyncio
 import logging
-from datetime import datetime
+import re
+from datetime import datetime, timedelta
 from typing import Optional
 import pytz
 
@@ -16,6 +17,67 @@ from core.models import Alert, WatchlistItem, SessionLocal
 
 logger = logging.getLogger("livermore.scanner")
 NY_TZ  = pytz.timezone("America/New_York")
+_OCC_RE = re.compile(r"^([A-Z]+)\d{6}[CP]\d{8}$")
+INDEX_ETFS = {"SPY", "QQQ", "IWM", "DIA"}
+MEGA_CAPS = {"AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "GOOG", "META", "TSLA", "AVGO"}
+
+
+def _flow_belongs_to_ticker(flow_obj: dict, ticker: str) -> bool:
+    chain = (flow_obj.get("option_chain") or "").strip().upper()
+    if not chain:
+        return False
+    match = _OCC_RE.match(chain)
+    return bool(match) and match.group(1) == ticker.upper()
+
+
+def _contract_belongs_to_ticker(contract: str, ticker: str) -> bool:
+    match = _OCC_RE.match((contract or "").strip().upper())
+    return bool(match) and match.group(1) == ticker.upper()
+
+
+def _assert_contract_belongs(ticker: str, contract: str) -> bool:
+    if not contract:
+        return True
+    if not _contract_belongs_to_ticker(contract, ticker):
+        logger.error(
+            f"CONTRACT MISMATCH AT PUBLISH: "
+            f"ticker={ticker} contract={contract} — SKIPPING"
+        )
+        return False
+    return True
+
+
+def _fallback_atm_contract(ticker: str, entry: float, direction: ICCDirection) -> str:
+    today = datetime.now(NY_TZ).date()
+    days_until_fri = (4 - today.weekday()) % 7 or 7
+    expiry = today + timedelta(days=days_until_fri)
+    expiry_str = expiry.strftime("%y%m%d")
+
+    ticker = ticker.upper()
+    if ticker in INDEX_ETFS:
+        strike_int = round(entry)
+    elif ticker in MEGA_CAPS:
+        strike_int = round(entry / 5) * 5
+    else:
+        strike_int = round(entry)
+
+    opt_type = "C" if direction == ICCDirection.BULLISH else "P"
+    strike_str = f"{int(strike_int * 1000):08d}"
+    return f"{ticker}{expiry_str}{opt_type}{strike_str}"
+
+
+def _price_levels(entry: float, direction: ICCDirection, ticker: str) -> tuple[float, float, float]:
+    ticker = ticker.upper()
+    if ticker in INDEX_ETFS:
+        sl_pct, tp1_pct, tp2_pct = 0.005, 0.010, 0.018
+    elif ticker in MEGA_CAPS:
+        sl_pct, tp1_pct, tp2_pct = 0.012, 0.025, 0.040
+    else:
+        sl_pct, tp1_pct, tp2_pct = 0.020, 0.040, 0.065
+
+    if direction == ICCDirection.BULLISH:
+        return entry * (1 - sl_pct), entry * (1 + tp1_pct), entry * (1 + tp2_pct)
+    return entry * (1 + sl_pct), entry * (1 - tp1_pct), entry * (1 - tp2_pct)
 
 
 class LivermoreScanner:
@@ -183,9 +245,11 @@ class LivermoreScanner:
 
         # ─── 10. Construir señal de opciones flow ─────────────
         opt_signal = None
+        best = None
         eligible_flow_alerts = [
             flow for flow in flow_alerts
             if float(flow.get("nominal_value", 0) or 0) >= LivermoreScorer.min_nominal_for_category(category)
+            and _flow_belongs_to_ticker(flow, ticker)
         ]
         if eligible_flow_alerts:
             best = max(eligible_flow_alerts, key=lambda f: float(f.get("nominal_value", 0) or 0))
@@ -227,9 +291,7 @@ class LivermoreScanner:
 
         # ─── 12. Niveles de precio ────────────────────────────
         entry = current_price
-        sl    = entry * 0.97 if direction == ICCDirection.BULLISH else entry * 1.03
-        tp1   = entry * 1.06 if direction == ICCDirection.BULLISH else entry * 0.94
-        tp2   = entry * 1.10 if direction == ICCDirection.BULLISH else entry * 0.90
+        sl, tp1, tp2 = _price_levels(entry, direction, ticker)
 
         # ─── 13. ADX estimado via GEX ─────────────────────────
         adx = 25.0  # default trending
@@ -265,6 +327,15 @@ class LivermoreScanner:
             best = max(eligible_flow_alerts, key=lambda f: float(f.get("nominal_value", 0) or 0))
             contract_label = best.get("option_chain", "")
             nominal_value = float(best.get("nominal_value", 0) or 0)
+        if not contract_label:
+            contract_label = _fallback_atm_contract(ticker, entry, direction)
+
+        if contract_label and not _contract_belongs_to_ticker(contract_label, ticker):
+            logger.error(
+                f"INVARIANTE VIOLADA: contrato {contract_label} "
+                f"no pertenece al ticker {ticker}. Alerta abortada."
+            )
+            return None
 
         return {
             "ticker":     ticker,
@@ -283,15 +354,15 @@ class LivermoreScanner:
             "contract":   contract_label,
             "strike":     None,
             "expiration": None,
-            "delta":      float(best.get("delta", 0.50) or 0.50) if eligible_flow_alerts else None,
+            "delta":      float(best.get("delta", 0.50) or 0.50) if best else None,
             "premium":    nominal_value,
             "nominal_value": nominal_value,
             "oi_data": oi_data,
             "chain_map": chain_map,
-            "repeated_flow": bool(best.get("repeated_flow")) if eligible_flow_alerts else False,
-            "flow_count": int(best.get("flow_count", 0) or 0) if eligible_flow_alerts else 0,
-            "accumulated_nominal": float(best.get("accumulated_nominal", 0) or 0) if eligible_flow_alerts else 0,
-            "is_single_leg": bool(best.get("is_single_leg", True)) if eligible_flow_alerts else True,
+            "repeated_flow": bool(best.get("repeated_flow")) if best else False,
+            "flow_count": int(best.get("flow_count", 0) or 0) if best else 0,
+            "accumulated_nominal": float(best.get("accumulated_nominal", 0) or 0) if best else 0,
+            "is_single_leg": bool(best.get("is_single_leg", True)) if best else True,
             "reason":     score_result.reason,
             "score_breakdown": {
                 "icc":      score_result.icc,
@@ -302,6 +373,7 @@ class LivermoreScanner:
             },
             "channels": score_result.alert_channels,
             "market_tide": market_tide.get("market_direction") if market_tide else "NEUTRAL",
+            "macro_calendar": macro_calendar or {},
         }
 
     async def _get_tickers(self) -> list[str]:
@@ -322,6 +394,9 @@ class LivermoreScanner:
         return all_tickers[:20]
 
     async def _fire_alert(self, result: dict):
+        if not _assert_contract_belongs(result["ticker"], result.get("contract", "")):
+            return
+
         alert_key = f"{result['ticker']}-{result['tier']}-{datetime.now(NY_TZ).strftime('%Y%m%d%H')}"
         if alert_key in self.alerts_today:
             return
