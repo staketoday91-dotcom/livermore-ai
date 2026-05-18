@@ -140,6 +140,7 @@ class LivermoreScorer:
         oi_data:        Optional[dict] = None,
         category:       str = "STOCK",
         chain_map:      Optional[dict] = None,
+        rollover_detected: bool = False,
     ) -> LivermoreScorecardResult:
 
         score_icc       = 0
@@ -290,6 +291,9 @@ class LivermoreScorer:
 
         # ─── TOTAL ───────────────────────────────────────────
         total = score_icc + score_dp + score_opt + score_macro + score_prepost + chain_bonus
+        if rollover_detected:
+            total += 8
+            reasons.append("ROLLOVER DETECTADO — capital movido desde posición anterior")
         total = max(0, min(total, 100))
 
         # ─── DECISION ────────────────────────────────────────

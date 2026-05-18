@@ -1060,6 +1060,11 @@ async def professional_dashboard():
         .stat-label { color:var(--muted); font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; }
         .stat-value { margin-top:7px; color:var(--text); font-size:28px; font-weight:800; font-variant-numeric:tabular-nums; }
         .market-card { padding:16px; margin-bottom:14px; }
+        .rollover-card { border-color:rgba(201,168,76,.38); background:rgba(201,168,76,.07); }
+        .rollover-pulse { display:inline-flex; width:8px; height:8px; border-radius:50%; background:var(--gold); box-shadow:0 0 0 0 rgba(201,168,76,.75); animation:pulseGold 1.6s infinite; }
+        @keyframes pulseGold { 70% { box-shadow:0 0 0 10px rgba(201,168,76,0); } 100% { box-shadow:0 0 0 0 rgba(201,168,76,0); } }
+        .rollover-item { padding:9px 0; border-top:1px solid rgba(201,168,76,.18); color:var(--muted); font-size:12px; line-height:1.4; }
+        .rollover-item strong { color:var(--gold); }
         .tide-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px; }
         .tide-arrow { font-size:48px; line-height:1; }
         .tide-value { font-size:24px; font-weight:800; text-transform:uppercase; }
@@ -1118,7 +1123,7 @@ async def professional_dashboard():
 
             <section class="panel">
                 <div class="panel-head"><h2 class="panel-title">Stats + Market Context</h2><span class="panel-meta" id="lastUpdate">Sin datos</span></div>
-                <div class="stats"><div id="marketContext"></div><div class="stats-grid" id="stats"></div></div>
+                <div class="stats"><div id="marketContext"></div><div id="rollovers"></div><div class="stats-grid" id="stats"></div></div>
             </section>
         </main>
 
@@ -1132,7 +1137,7 @@ async def professional_dashboard():
         const els = {
             alerts: document.getElementById("alerts"), alertFilter: document.getElementById("alertFilter"),
             clearFilter: document.getElementById("clearFilter"), filterTicker: document.getElementById("filterTicker"),
-            marketContext: document.getElementById("marketContext"), stats: document.getElementById("stats"),
+            marketContext: document.getElementById("marketContext"), rollovers: document.getElementById("rollovers"), stats: document.getElementById("stats"),
             themeToggle: document.getElementById("themeToggle"), todayCount: document.getElementById("todayCount"),
             watchlist: document.getElementById("watchlist"), watchCount: document.getElementById("watchCount"),
             lastUpdate: document.getElementById("lastUpdate"), lastScan: document.getElementById("lastScan"), etClock: document.getElementById("etClock")
@@ -1237,6 +1242,24 @@ async def professional_dashboard():
                 <div class="context-row"><span>Net call premium</span><strong>${money(tide?.net_call_premium)}</strong></div>
                 <div class="context-row"><span>Net put premium</span><strong>${money(tide?.net_put_premium)}</strong></div></div>`;
         }
+        function renderRollovers(rollovers) {
+            const list = Array.isArray(rollovers) ? rollovers : [];
+            if (!list.length) {
+                els.rollovers.innerHTML = `<div class="market-card"><div class="stat-label">Rollovers Activos</div><div class="context-row"><span>Sin rotación whale activa</span><strong>--</strong></div></div>`;
+                return;
+            }
+            els.rollovers.innerHTML = `<div class="market-card rollover-card">
+                <div class="tide-head"><div><div class="stat-label">Rollovers Activos</div><div class="tide-value neutral"><span class="rollover-pulse"></span> ${list.length}</div></div></div>
+                ${list.map((r) => `<div class="rollover-item">→ DESDE <strong>${escapeHtml(r.from_ticker)}</strong> HACIA <strong>${escapeHtml(r.to_ticker)}</strong> | ${compactMoney(r.to_nominal)} | Confianza ${escapeHtml(r.confidence)}%</div>`).join("")}
+            </div>`;
+        }
+        async function refreshRollovers() {
+            try {
+                renderRollovers(await getJson("/api/rollovers"));
+            } catch (error) {
+                els.rollovers.innerHTML = `<div class="market-card"><div class="stat-label">Rollovers Activos</div><div class="context-row"><span>Error</span><strong>${escapeHtml(error.message)}</strong></div></div>`;
+            }
+        }
         function renderWatchlist(items) {
             const scores = new Map(), phases = new Map();
             latestAlerts.forEach((a) => { const t = String(a.ticker || "").toUpperCase(); if (t && !scores.has(t)) scores.set(t, scoreValue(a.score)); if (t && !phases.has(t)) phases.set(t, phaseLabel(a.icc_phase)); });
@@ -1269,14 +1292,14 @@ async def professional_dashboard():
             try {
                 const [alerts, stats, watchlist, marketTide] = await Promise.all([getJson("/api/alerts?limit=200"), getJson("/api/stats"), getJson("/api/watchlist"), getJson("/api/market-tide")]);
                 latestAlerts = Array.isArray(alerts) ? alerts : []; latestWatchlist = Array.isArray(watchlist) ? watchlist : [];
-                renderAlerts(); renderStats(stats); renderMarketContext(marketTide, stats); renderWatchlist(latestWatchlist);
+                renderAlerts(); renderStats(stats); renderMarketContext(marketTide, stats); renderWatchlist(latestWatchlist); refreshRollovers();
                 els.todayCount.textContent = stats.today ?? 0; lastScanDate = stats.last_scan ? new Date(stats.last_scan) : (latestAlerts[0]?.date ? new Date(latestAlerts[0].date) : null);
                 els.lastUpdate.textContent = "Actualizado"; updateLastScan();
             } catch (error) { els.alerts.innerHTML = `<div class="empty">Error cargando datos: ${escapeHtml(error.message)}</div>`; els.lastUpdate.textContent = "Error"; }
         }
         function updateClock() { els.etClock.textContent = new Intl.DateTimeFormat("es-US", { timeZone:"America/New_York", hour:"2-digit", minute:"2-digit", second:"2-digit", hour12:false }).format(new Date()); }
         function updateLastScan() { els.lastScan.textContent = lastScanDate ? minutesAgo(lastScanDate.toISOString()) : "--"; }
-        updateClock(); refreshDashboard(); setInterval(updateClock, 1000); setInterval(updateLastScan, 1000); setInterval(refreshDashboard, 30000);
+        updateClock(); refreshDashboard(); setInterval(updateClock, 1000); setInterval(updateLastScan, 1000); setInterval(refreshDashboard, 30000); setInterval(refreshRollovers, 60000);
     </script>
 </body>
 </html>
@@ -1827,6 +1850,16 @@ async def get_market_tide():
     except Exception as e:
         logger.exception("get_market_tide error")
         raise HTTPException(500, f"market_tide_error: {type(e).__name__}: {e}")
+
+
+@app.get("/api/rollovers")
+async def get_rollovers():
+    try:
+        from core.uw_fetcher import UWFetcher
+        return await UWFetcher().detect_rollover()
+    except Exception as e:
+        logger.exception("get_rollovers error")
+        raise HTTPException(500, f"rollovers_error: {type(e).__name__}: {e}")
 
 
 @app.patch("/api/alerts/{alert_id}")

@@ -172,6 +172,71 @@ class UWFetcher:
             return []
         return _group_repeated_flow(r.json().get("data", []))
 
+    async def detect_rollover(self) -> list[dict]:
+        """
+        Detecta cuando una ballena cierra posición ganadora y abre nueva.
+        Señal: grandes ventas en BID seguidas de grandes compras en ASK
+        en ventana de tiempo corta (< 30 minutos).
+        """
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(
+                f"{UW_BASE}/option-trades/flow-alerts",
+                headers=_headers(),
+                params={"limit": 100}
+            )
+        if r.status_code != 200:
+            return []
+        
+        data = r.json().get("data", [])
+        
+        # Separar: ventas grandes en BID (cerrando) y compras en ASK (abriendo)
+        closing = []  # ventas en bid = cerrando posición
+        opening = []  # compras en ask = abriendo posición
+        
+        for item in data:
+            item = _with_nominal_value(item)
+            nominal = float(item.get("nominal_value", 0))
+            if nominal < 1_000_000:  # solo ballenas $1M+
+                continue
+            
+            ask_side = float(item.get("ask_side_pct", item.get("total_ask_side_pct", 0)))
+            
+            if ask_side < 0.3:  # ejecutado en BID = cerrando
+                closing.append({
+                    "ticker": item.get("ticker"),
+                    "nominal": nominal,
+                    "contract": item.get("option_chain"),
+                    "time": item.get("created_at"),
+                    "type": "CLOSING"
+                })
+            elif ask_side > 0.7:  # ejecutado en ASK = abriendo
+                opening.append({
+                    "ticker": item.get("ticker"),
+                    "nominal": nominal,
+                    "contract": item.get("option_chain"),
+                    "time": item.get("created_at"),
+                    "type": "OPENING"
+                })
+        
+        # Detectar pares rollover: cierre seguido de apertura similar en tamaño
+        rollovers = []
+        for close in closing:
+            for open_pos in opening:
+                # Mismo rango de tamaño (within 40%)
+                size_ratio = min(close["nominal"], open_pos["nominal"]) / max(close["nominal"], open_pos["nominal"])
+                if size_ratio > 0.6 and close["ticker"] != open_pos["ticker"]:
+                    rollovers.append({
+                        "from_ticker": close["ticker"],
+                        "from_contract": close["contract"],
+                        "from_nominal": close["nominal"],
+                        "to_ticker": open_pos["ticker"],
+                        "to_contract": open_pos["contract"],
+                        "to_nominal": open_pos["nominal"],
+                        "confidence": round(size_ratio * 100, 1)
+                    })
+        
+        return rollovers[:5]  # top 5 rollovers detectados
+
     async def get_oi_change(self, ticker: str) -> dict:
         """
         Compara OI de hoy vs ayer para detectar convicción institucional.

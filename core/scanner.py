@@ -56,11 +56,24 @@ class LivermoreScanner:
 
         # Tickers activos segun UW screener (no watchlist hardcoded)
         tickers = await self._get_tickers()
+        rollovers = await self.uw.detect_rollover()
+        rollover_targets = {r["to_ticker"] for r in rollovers if r.get("to_ticker")}
+        if rollovers:
+            logger.info(f"Rollovers detectados: {len(rollovers)}")
+            # Si el ticker destino del rollover está en watchlist, boost su score
+            for r in rollovers:
+                if r["to_ticker"] in tickers:
+                    logger.info(f"ROLLOVER → {r['to_ticker']} desde {r['from_ticker']}")
         results = []
 
         for ticker in tickers:
             try:
-                result = await self._analyze_ticker(ticker, session, market_tide)
+                result = await self._analyze_ticker(
+                    ticker,
+                    session,
+                    market_tide,
+                    rollover_detected=ticker in rollover_targets,
+                )
                 if result:
                     results.append(result)
                 await asyncio.sleep(0.3)
@@ -77,7 +90,8 @@ class LivermoreScanner:
                     f"{sum(1 for r in results if r['score'] >= 75)} alertas")
 
     async def _analyze_ticker(self, ticker: str, session: str,
-                               market_tide: Optional[dict]) -> Optional[dict]:
+                               market_tide: Optional[dict],
+                               rollover_detected: bool = False) -> Optional[dict]:
 
         # ─── 1. Datos del ticker via UW ──────────────────────
         ticker_data = await self.uw.get_ticker_data(ticker)
@@ -235,6 +249,7 @@ class LivermoreScanner:
             oi_data=oi_data,
             category=category,
             chain_map=chain_map,
+            rollover_detected=rollover_detected,
         )
 
         # ─── 15. Contrato recomendado del flow alert ──────────
