@@ -1936,6 +1936,38 @@ async def get_alerts(
         raise HTTPException(500, f"alerts_error: {type(e).__name__}: {e}")
 
 
+@app.get("/api/admin/contaminated-alerts")
+async def get_contaminated_alerts(token: str = Query(...), db: Session = Depends(get_db)):
+    import os as _os, re as _re
+    if not _os.getenv("ADMIN_TOKEN") or token != _os.getenv("ADMIN_TOKEN"):
+        raise HTTPException(403, "forbidden")
+    rows = db.query(Alert).filter(Alert.contract != None).filter(Alert.contract != "").all()
+    occ_re = _re.compile(r'^([A-Z]+)\d{6}[CP]\d{8}$')
+    bad = []
+    for a in rows:
+        m = occ_re.match((a.contract or "").strip().upper())
+        if not m or m.group(1) != (a.ticker or "").upper():
+            bad.append({"id": a.id, "ticker": a.ticker, "contract": a.contract})
+    return {"total_bad": len(bad), "alerts": bad}
+
+
+@app.post("/api/admin/cleanup-contaminated")
+async def cleanup_contaminated_alerts(token: str = Query(...), db: Session = Depends(get_db)):
+    import os as _os, re as _re
+    if not _os.getenv("ADMIN_TOKEN") or token != _os.getenv("ADMIN_TOKEN"):
+        raise HTTPException(403, "forbidden")
+    rows = db.query(Alert).filter(Alert.contract != None).filter(Alert.contract != "").all()
+    occ_re = _re.compile(r'^([A-Z]+)\d{6}[CP]\d{8}$')
+    deleted = 0
+    for a in rows:
+        m = occ_re.match((a.contract or "").strip().upper())
+        if not m or m.group(1) != (a.ticker or "").upper():
+            db.delete(a)
+            deleted += 1
+    db.commit()
+    return {"deleted": deleted}
+
+
 @app.get("/api/backtest")
 async def get_backtest(limit: int = Query(50), db: Session = Depends(get_db)):
     try:
