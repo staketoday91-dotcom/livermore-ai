@@ -5,6 +5,7 @@ Corre cada 5 min en market hours
 """
 import asyncio
 import logging
+import os
 import re
 from datetime import datetime, timedelta
 from typing import Optional
@@ -12,7 +13,7 @@ import pytz
 
 from core.icc_engine import ICCDetector, RegimeDetector, ICCPhase, ICCDirection
 from core.scorer import LivermoreScorer, DarkPoolSignal, OptionsFlowSignal, MacroContext
-from core.uw_fetcher import UWFetcher, classify_ticker
+from core.uw_fetcher import UWFetcher, classify_ticker, normalize_occ_contract
 from core.models import Alert, WatchlistItem, SessionLocal
 
 logger = logging.getLogger("livermore.scanner")
@@ -23,16 +24,24 @@ MEGA_CAPS = {"AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "GOOG", "META", "TSLA", "A
 
 
 def _flow_belongs_to_ticker(flow_obj: dict, ticker: str) -> bool:
-    chain = (flow_obj.get("option_chain") or "").strip().upper()
-    if not chain:
+    chain = normalize_occ_contract(flow_obj)
+    if chain:
+        match = _OCC_RE.match(chain)
+        return bool(match) and match.group(1) == ticker.upper()
+
+    flow_ticker = str(flow_obj.get("ticker") or flow_obj.get("underlying_symbol") or "").upper()
+    if not flow_ticker:
         return False
-    match = _OCC_RE.match(chain)
-    return bool(match) and match.group(1) == ticker.upper()
+    return flow_ticker == ticker.upper()
 
 
 def _contract_belongs_to_ticker(contract: str, ticker: str) -> bool:
     match = _OCC_RE.match((contract or "").strip().upper())
     return bool(match) and match.group(1) == ticker.upper()
+
+
+def _flow_contract(flow_obj: dict) -> str:
+    return normalize_occ_contract(flow_obj)
 
 
 def _assert_contract_belongs(ticker: str, contract: str) -> bool:
@@ -89,6 +98,8 @@ class LivermoreScanner:
         self.uw         = UWFetcher()
         self.discord    = discord_bot
         self.alerts_today = set()
+        self.ticker_delay = float(os.getenv("SCAN_TICKER_DELAY_SECONDS", "4.0"))
+        self.max_scan_tickers = int(os.getenv("MAX_SCAN_TICKERS", "20"))
 
     def is_market_hours(self) -> bool:
         now = datetime.now(NY_TZ)
@@ -142,7 +153,7 @@ class LivermoreScanner:
                 )
                 if result:
                     results.append(result)
-                await asyncio.sleep(0.3)
+                await asyncio.sleep(self.ticker_delay)
             except Exception as e:
                 logger.error(f"Error {ticker}: {e}")
 
@@ -274,7 +285,7 @@ class LivermoreScanner:
                 delta=float(best.get("delta", 0.50) or 0.50),
                 iv_rank=iv_rank,
                 expiration_dte=30,
-                contract=best.get("option_chain", ""),
+                contract=_flow_contract(best),
                 repeated_flow=bool(best.get("repeated_flow")),
                 flow_count=int(best.get("flow_count", 0) or 0),
                 accumulated_nominal=float(best.get("accumulated_nominal", nominal_value) or nominal_value),
@@ -325,7 +336,7 @@ class LivermoreScanner:
         nominal_value = None
         if eligible_flow_alerts:
             best = max(eligible_flow_alerts, key=lambda f: float(f.get("nominal_value", 0) or 0))
-            contract_label = best.get("option_chain", "")
+            contract_label = _flow_contract(best)
             nominal_value = float(best.get("nominal_value", 0) or 0)
         if not contract_label:
             contract_label = _fallback_atm_contract(ticker, entry, direction)
@@ -391,13 +402,16 @@ class LivermoreScanner:
 
         # Merge: custom primero, luego UW screener
         all_tickers = list(dict.fromkeys(custom + uw_tickers))
-        return all_tickers[:20]
+        return all_tickers[:self.max_scan_tickers]
 
     async def _fire_alert(self, result: dict):
         if not _assert_contract_belongs(result["ticker"], result.get("contract", "")):
             return
 
-        alert_key = f"{result['ticker']}-{result['tier']}-{datetime.now(NY_TZ).strftime('%Y%m%d%H')}"
+        alert_key = (
+            f"{result['ticker']}-{result.get('contract', '')}-{result['tier']}-"
+            f"{datetime.now(NY_TZ).strftime('%Y%m%d%H')}"
+        )
         if alert_key in self.alerts_today:
             return
         self.alerts_today.add(alert_key)

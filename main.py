@@ -139,7 +139,7 @@ def _purge_contaminated_alerts():
             db.close()
 
 
-# ─── Lifespan — arranca bot + scanner ─────────────────────────────────────────
+# ─── Lifespan — inicializa solo web/API ───────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
@@ -178,27 +178,34 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"DB init fallo (app sigue arriba para servir /health): {e}")
 
-    discord_bot = None
-    try:
-        from bot.discord_bot import create_bot, run_bot
-        discord_bot = create_bot()
-        asyncio.create_task(run_bot(discord_bot))
-        logger.info("Discord bot task iniciado")
-    except Exception as e:
-        logger.warning(f"Discord bot no disponible: {e}")
+    if os.getenv("RUN_WORKER_IN_WEB", "false").lower() in {"1", "true", "yes"}:
+        logger.warning(
+            "RUN_WORKER_IN_WEB activo: web arrancara Discord+scanner. "
+            "Usar solo en desarrollo; en produccion el proceso oficial es worker.py."
+        )
+        discord_bot = None
+        try:
+            from bot.discord_bot import create_bot, run_bot
+            discord_bot = create_bot()
+            asyncio.create_task(run_bot(discord_bot))
+            logger.info("Discord bot task iniciado desde web")
+        except Exception as e:
+            logger.warning(f"Discord bot no disponible: {e}")
 
-    try:
-        from core.scanner import LivermoreScanner
-        from apscheduler.schedulers.asyncio import AsyncIOScheduler
-        scanner   = LivermoreScanner(discord_bot=discord_bot)
-        scheduler = AsyncIOScheduler(timezone="America/New_York")
-        scheduler.add_job(scanner.run_scan, "cron",
-                          day_of_week="mon-fri",
-                          hour="8-19", minute="*/5")
-        scheduler.start()
-        logger.info("Scanner scheduler iniciado — cada 5min en market hours")
-    except Exception as e:
-        logger.warning(f"Scanner no disponible: {e}")
+        try:
+            from core.scanner import LivermoreScanner
+            from apscheduler.schedulers.asyncio import AsyncIOScheduler
+            scanner   = LivermoreScanner(discord_bot=discord_bot)
+            scheduler = AsyncIOScheduler(timezone="America/New_York")
+            scheduler.add_job(scanner.run_scan, "cron",
+                              day_of_week="mon-fri",
+                              hour="8-19", minute="*/5")
+            scheduler.start()
+            logger.info("Scanner scheduler iniciado desde web")
+        except Exception as e:
+            logger.warning(f"Scanner no disponible: {e}")
+    else:
+        logger.info("Web/API iniciado sin Discord ni scheduler. Worker oficial: python worker.py")
 
     yield
 
@@ -1586,6 +1593,13 @@ async def backtesting_page(db: Session = Depends(get_db)):
 
 
 def _serialize_alert(a: Alert) -> dict:
+    contract = (a.contract or "").strip().upper()
+    ticker = (a.ticker or "").strip().upper()
+    if contract:
+        match = _OCC_RE.match(contract)
+        if not match or match.group(1) != ticker:
+            logger.error(f"Alerta contaminada omitida en API: id={a.id} ticker={ticker} contract={contract}")
+            contract = ""
     return {
         "id":        a.id,
         "ticker":    a.ticker,
@@ -1598,7 +1612,7 @@ def _serialize_alert(a: Alert) -> dict:
         "sl":        a.stop_loss,
         "tp1":       a.target1,
         "tp2":       a.target2,
-        "contract":  a.contract,
+        "contract":  contract,
         "strike":    a.strike,
         "expiration":a.expiration,
         "delta":     a.delta,

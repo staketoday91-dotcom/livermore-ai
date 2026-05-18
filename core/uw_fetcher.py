@@ -9,6 +9,7 @@ import asyncio
 from datetime import datetime, date, timedelta
 from typing import Optional
 import logging
+import re
 
 logger = logging.getLogger("livermore.fetcher")
 
@@ -18,6 +19,7 @@ UW_BASE  = "https://api.unusualwhales.com/api"
 ETF_LIST = {"SPY", "QQQ", "IWM", "DIA", "XLF", "XLE", "XLK", "XLV", "XLI", "XLB", "XLU", "XLRE", "XLC", "XLY", "XLP", "GLD", "SLV", "TLT", "HYG", "EEM", "SOXL", "SOXS", "TQQQ", "UVXY", "VXX"}
 
 INDEX_LIST = {"SPX", "SPXW", "NDX", "RUT", "VIX", "COMP"}
+_OCC_RE = re.compile(r"^([A-Z]+)\d{6}[CP]\d{8}$")
 
 
 def classify_ticker(ticker: str) -> str:
@@ -36,6 +38,20 @@ def _float(value, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def normalize_occ_contract(flow_item: dict) -> str:
+    """Devuelve el simbolo OCC limpio desde cualquiera de los campos de UW."""
+    for key in ("option_chain", "option_symbol", "contract", "symbol"):
+        raw = str(flow_item.get(key) or "").strip().upper().replace(" ", "")
+        if _OCC_RE.match(raw):
+            return raw
+    return ""
+
+
+def contract_ticker(contract: str) -> str:
+    match = _OCC_RE.match((contract or "").strip().upper())
+    return match.group(1) if match else ""
 
 
 def is_single_leg(flow_item: dict) -> bool:
@@ -75,6 +91,10 @@ def _extract_delta(flow_item: dict) -> float:
 
 def _with_nominal_value(alert: dict) -> dict:
     enriched = dict(alert)
+    contract = normalize_occ_contract(enriched)
+    if contract:
+        enriched["option_chain"] = contract
+        enriched["contract_ticker"] = contract_ticker(contract)
     total_premium = _float(enriched.get("total_premium"))
     if total_premium > 0:
         enriched["nominal_value"] = total_premium
@@ -99,12 +119,10 @@ def _with_nominal_value(alert: dict) -> dict:
 
 
 def _flow_contract_key(alert: dict) -> str:
-    return str(
-        alert.get("option_chain")
-        or alert.get("contract")
-        or alert.get("option_symbol")
-        or "|".join(str(alert.get(k, "")) for k in ("ticker", "strike", "expiration", "expiry", "option_type"))
-    )
+    contract = normalize_occ_contract(alert)
+    if contract:
+        return contract
+    return str("|".join(str(alert.get(k, "")) for k in ("ticker", "strike", "expiration", "expiry", "option_type")))
 
 
 def _group_repeated_flow(alerts: list[dict]) -> list[dict]:
@@ -632,28 +650,47 @@ class UWFetcher:
         Retorna lista de tickers con mayor actividad institucional hoy.
         Reemplaza el watchlist hardcoded.
         """
-        data = await self.get_screener(limit=50)
-        if not data:
-            return ["SPY", "QQQ", "NVDA", "AAPL", "TSLA", "MSFT", "AMZN", "META"]
+        data, flow = await asyncio.gather(
+            self.get_screener(limit=100),
+            self.get_flow_alerts(min_premium=100_000),
+            return_exceptions=True,
+        )
+        if isinstance(data, Exception):
+            logger.warning(f"screener error: {data}")
+            data = []
+        if isinstance(flow, Exception):
+            logger.warning(f"flow universe error: {flow}")
+            flow = []
+
+        fallback = ["SPY", "QQQ", "NVDA", "AAPL", "TSLA", "MSFT", "AMZN", "META"]
+        if not data and not flow:
+            return fallback
 
         # Ordenar por premium total de opciones
         sorted_data = sorted(
             data,
-            key=lambda x: float(x.get("call_premium", 0)) + float(x.get("bearish_premium", 0)),
+            key=lambda x: _float(x.get("call_premium")) + _float(x.get("bearish_premium")),
             reverse=True
         )
 
-        # Top 15 tickers con mayor actividad, excluyendo indices
-        exclude = {"SPXW", "SPX", "VIX", "NDX", "RUT"}
+        # Combina screener y flow para evitar quedar atrapados solo en Mag 7/ETFs.
         tickers = []
-        for item in sorted_data:
-            ticker = item.get("ticker", "")
-            if ticker and ticker not in exclude:
+        for item in flow:
+            ticker = str(item.get("ticker") or item.get("contract_ticker") or "").upper()
+            if ticker:
                 tickers.append(ticker)
-            if len(tickers) >= 15:
-                break
+        for item in sorted_data:
+            ticker = str(item.get("ticker", "")).upper()
+            if ticker:
+                tickers.append(ticker)
 
-        return tickers if tickers else ["SPY", "QQQ", "NVDA", "AAPL", "TSLA"]
+        unique = list(dict.fromkeys(tickers))
+        stocks = [ticker for ticker in unique if classify_ticker(ticker) == "STOCK"]
+        etfs = [ticker for ticker in unique if classify_ticker(ticker) == "ETF"]
+        indexes = [ticker for ticker in unique if classify_ticker(ticker) == "INDEX"]
+
+        balanced = stocks[:24] + etfs[:8] + indexes[:4]
+        return balanced if balanced else fallback
 
     # ─── MARKET TIDE ─────────────────────────────────────────────────────────
 

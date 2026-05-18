@@ -64,6 +64,27 @@ class ContractInvariantTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result is None or result["contract"].startswith("NVDA"))
 
+    async def test_accepts_matching_contract_from_option_symbol_field(self):
+        class OptionSymbolUW(FakeUW):
+            async def get_ticker_flow(self, ticker):
+                rows = await super().get_ticker_flow(ticker)
+                rows[0].pop("option_chain")
+                rows[0]["option_symbol"] = "NVDA261016C01000000"
+                return rows
+
+        scanner = LivermoreScanner()
+        scanner.uw = OptionSymbolUW()
+
+        result = await scanner._analyze_ticker(
+            "NVDA",
+            "REGULAR",
+            {"market_direction": "NEUTRAL"},
+            {"has_event_today": False, "has_event_tomorrow": False, "events": []},
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["contract"], "NVDA261016C01000000")
+
 
 if __name__ == "__main__":
     unittest.main()
