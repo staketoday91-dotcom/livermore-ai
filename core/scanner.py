@@ -91,6 +91,7 @@ class LivermoreScanner:
 
         # ─── 2. Flow de opciones del ticker ──────────────────
         flow_alerts = await self.uw.get_ticker_flow(ticker)
+        oi_data = await self.uw.get_oi_change(ticker)
 
         # ─── 3. Dark pool ─────────────────────────────────────
         dp_raw = await self.uw.analyze_dark_pool(ticker, current_price)
@@ -224,6 +225,7 @@ class LivermoreScanner:
             macro=macro,
             adx=adx,
             regime=regime,
+            oi_data=oi_data,
         )
 
         # ─── 15. Contrato recomendado del flow alert ──────────
@@ -253,6 +255,7 @@ class LivermoreScanner:
             "delta":      None,
             "premium":    nominal_value,
             "nominal_value": nominal_value,
+            "oi_data": oi_data,
             "reason":     score_result.reason,
             "score_breakdown": {
                 "icc":      score_result.icc,
@@ -305,6 +308,11 @@ class LivermoreScanner:
                 target2=result["target2"],
                 contract=result.get("contract", ""),
                 premium=result.get("nominal_value"),
+                oi_growing=bool(result.get("oi_data", {}).get("oi_growing")),
+                oi_change_pct=result.get("oi_data", {}).get("oi_change_pct", 0),
+                oi_days_growing=result.get("oi_data", {}).get("days_growing", 0),
+                oi_today=result.get("oi_data", {}).get("today_oi"),
+                oi_yesterday=result.get("oi_data", {}).get("yesterday_oi"),
                 signal_summary=result["reason"],
                 icc_phase=result["icc_phase"],
                 icc_signal=result["icc_signal"],

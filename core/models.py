@@ -52,6 +52,11 @@ class Alert(Base):
     volume          = Column(Integer)
     open_interest   = Column(Integer)
     vol_oi_ratio    = Column(Float)
+    oi_growing      = Column(Boolean, default=False)
+    oi_change_pct   = Column(Float, default=0)
+    oi_days_growing = Column(Integer, default=0)
+    oi_today        = Column(Integer)
+    oi_yesterday    = Column(Integer)
 
     # Dark Pool
     dp_print_price  = Column(Float)

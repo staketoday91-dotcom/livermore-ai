@@ -100,6 +100,7 @@ class LivermoreScorer:
         macro:          MacroContext,
         adx:            float,
         regime:         str,
+        oi_data:        Optional[dict] = None,
     ) -> LivermoreScorecardResult:
 
         score_icc       = 0
@@ -175,6 +176,22 @@ class LivermoreScorer:
             else:
                 score_opt = 25
                 reasons.append(f"Ballena confirmada ${nominal/1_000_000:.1f}M")
+
+            oi = oi_data or {}
+            if oi.get("oi_growing"):
+                days_growing = int(oi.get("days_growing", 0) or 0)
+                if days_growing >= 3:
+                    multiplier = 2.0
+                    reasons.append(f"OI creciendo {days_growing} dias — conviccion maxima")
+                elif days_growing == 2:
+                    multiplier = 1.5
+                    reasons.append("OI creciendo 2 dias — conviccion institucional")
+                elif days_growing == 1:
+                    multiplier = 1.2
+                    reasons.append("OI creciendo dia-over-dia")
+                else:
+                    multiplier = 1.0
+                score_opt = min(25, round(score_opt * multiplier))
 
             contract = opt.contract
             score_opt = min(score_opt, 25)

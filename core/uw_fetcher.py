@@ -94,6 +94,52 @@ class UWFetcher:
             return []
         return [_with_nominal_value(d) for d in r.json().get("data", [])]
 
+    async def get_oi_change(self, ticker: str) -> dict:
+        """
+        Compara OI de hoy vs ayer para detectar convicción institucional.
+        Usa el endpoint de historic option volume de UW.
+        GET /api/stock/{ticker}/option-volume-history
+        """
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(
+                f"{UW_BASE}/stock/{ticker}/option-volume-history",
+                headers=_headers(),
+                params={"limit": 3}
+            )
+        if r.status_code != 200:
+            return {"oi_growing": False, "oi_change_pct": 0, "days_growing": 0}
+        
+        data = r.json().get("data", [])
+        if len(data) < 2:
+            return {"oi_growing": False, "oi_change_pct": 0, "days_growing": 0}
+        
+        # Ordenar por fecha descendente
+        sorted_data = sorted(data, key=lambda x: x.get("date", ""), reverse=True)
+        
+        today_oi = float(sorted_data[0].get("open_interest", 0))
+        yesterday_oi = float(sorted_data[1].get("open_interest", 0))
+        
+        oi_change_pct = ((today_oi - yesterday_oi) / yesterday_oi * 100) if yesterday_oi > 0 else 0
+        oi_growing = oi_change_pct > 0
+        
+        # Contar dias consecutivos creciendo
+        days_growing = 0
+        for i in range(len(sorted_data) - 1):
+            curr = float(sorted_data[i].get("open_interest", 0))
+            prev = float(sorted_data[i+1].get("open_interest", 0))
+            if curr > prev:
+                days_growing += 1
+            else:
+                break
+        
+        return {
+            "oi_growing": oi_growing,
+            "oi_change_pct": round(oi_change_pct, 2),
+            "days_growing": days_growing,
+            "today_oi": int(today_oi),
+            "yesterday_oi": int(yesterday_oi)
+        }
+
     # ─── DARK POOL ───────────────────────────────────────────────────────────
 
     async def get_dark_pool(self, ticker: str) -> list[dict]:

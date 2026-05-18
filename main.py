@@ -54,18 +54,34 @@ def _ensure_schema():
         if not inspector.has_table("alerts"):
             return
         cols = {c["name"]: str(c["type"]).upper() for c in inspector.get_columns("alerts")}
-        tier_type = cols.get("tier", "")
         needs_drop = (
-            tier_type.startswith("INT")
-            or "score_macro" not in cols
+            "score_macro" not in cols
             or "current_price" not in cols
             or "updated_at" not in cols
         )
         if needs_drop:
             with engine.connect() as conn:
-                conn.execute(text("DROP TABLE IF EXISTS alerts CASCADE"))
+                if engine.dialect.name == "postgresql":
+                    conn.execute(text("DROP TABLE IF EXISTS alerts CASCADE"))
+                else:
+                    conn.execute(text("DROP TABLE IF EXISTS alerts"))
                 conn.commit()
             logger.warning("alerts table dropped — esquema viejo detectado, recreando")
+            return
+
+        missing_columns = {
+            "oi_growing": "BOOLEAN DEFAULT FALSE",
+            "oi_change_pct": "FLOAT DEFAULT 0",
+            "oi_days_growing": "INTEGER DEFAULT 0",
+            "oi_today": "INTEGER",
+            "oi_yesterday": "INTEGER",
+        }
+        with engine.connect() as conn:
+            for col, col_type in missing_columns.items():
+                if col not in cols:
+                    conn.execute(text(f"ALTER TABLE alerts ADD COLUMN {col} {col_type}"))
+                    logger.info(f"alerts.{col} agregado para OI conviction tracking")
+            conn.commit()
     except Exception as e:
         logger.warning(f"_ensure_schema fallo (no fatal): {e}")
 
@@ -970,6 +986,8 @@ async def professional_dashboard():
         .phase.indication { color:#f1c40f; background:rgba(241,196,15,.12); border-color:rgba(241,196,15,.3); }
         .phase.correction { color:var(--amber); background:rgba(232,146,26,.14); border-color:rgba(232,146,26,.36); }
         .phase.continuation { color:var(--green); background:rgba(39,209,127,.11); border-color:rgba(39,209,127,.32); }
+        .phase.oi-soft { color:#f1c40f; background:rgba(241,196,15,.12); border-color:rgba(241,196,15,.3); }
+        .phase.oi-strong { color:var(--green); background:rgba(39,209,127,.11); border-color:rgba(39,209,127,.32); }
         .tier.alert { color:var(--green); background:rgba(39,209,127,.11); border-color:rgba(39,209,127,.32); }
         .tier.premium { color:var(--amber); background:rgba(232,146,26,.14); border-color:rgba(232,146,26,.36); }
         .tier.livermore { color:var(--gold); background:rgba(201,168,76,.14); border-color:rgba(201,168,76,.42); }
@@ -1101,6 +1119,14 @@ async def professional_dashboard():
             const entry = Number(alert.entry), tp1 = Number(alert.tp1);
             return Number.isFinite(entry) && Number.isFinite(tp1) && tp1 < entry ? "BEARISH" : "BULLISH";
         }
+        function oiBadge(alert) {
+            const days = Number(alert.oi_days_growing || alert.oi?.days_growing || 0);
+            const growing = Boolean(alert.oi_growing || alert.oi?.oi_growing);
+            if (!growing || days < 1) return "";
+            const cls = days >= 3 ? "oi-strong" : "oi-soft";
+            const label = days >= 3 ? `OI ↑ ${days} días` : "OI ↑";
+            return `<span class="phase ${cls}">${label}</span>`;
+        }
         function toIBKR(raw) { const m = String(raw || "").match(/^([A-Z]+)(\\d{6})([CP])(\\d{8})$/); if (!m) return raw || ""; return m[1] + " " + m[2] + m[3] + " " + (parseInt(m[4]) / 1000).toString(); }
         async function copyIBKR(button) { const text = button.dataset.contract || ""; if (!text) return; await navigator.clipboard.writeText(text); button.textContent = "COPIADO"; setTimeout(() => { button.textContent = "COPIAR"; }, 1000); }
         async function getJson(url) { const response = await fetch(url, { cache:"no-store" }); if (!response.ok) throw new Error(`${response.status} ${response.statusText}`); return response.json(); }
@@ -1130,7 +1156,7 @@ async def professional_dashboard():
                 const ibkr = contract ? toIBKR(contract) : "N/A", direction = directionLabel(alert), dirClass = direction === "BEARISH" ? "bearish" : "bullish";
                 const signals = [alert.icc_phase ? `ICC ${alert.icc_phase}` : null, alert.regime, alert.session, alert.signal].filter(Boolean).join(" · ");
                 return `<article class="alert-card">
-                    <div class="alert-top"><div class="alert-title"><span class="ticker">${escapeHtml(alert.ticker)}</span><span class="tier ${tierClass(alert.tier)}">${tierLabel(alert.tier)}</span></div><div class="score-big">${score}<span>/100</span></div></div>
+                    <div class="alert-top"><div class="alert-title"><span class="ticker">${escapeHtml(alert.ticker)}</span><span class="tier ${tierClass(alert.tier)}">${tierLabel(alert.tier)}</span>${oiBadge(alert)}</div><div class="score-big">${score}<span>/100</span></div></div>
                     <div class="direction-line ${dirClass}"><span class="direction-arrow">${direction === "BEARISH" ? "↓" : "↑"}</span><span>${direction}</span></div>
                     <div class="contract-row"><span class="contract">${escapeHtml(fmt(ibkr,"N/A"))}</span><span class="score-num">${compactMoney(alert.nominal_value ?? alert.premium)}</span>${contract ? `<button class="copy-btn" data-contract="${escapeHtml(ibkr)}" onclick="copyIBKR(this)">COPIAR</button>` : ""}</div>
                     <div class="levels"><div class="level"><div class="level-label">Entry</div><div class="level-value">${money(alert.entry)}</div></div><div class="level"><div class="level-label">SL</div><div class="level-value">${money(alert.sl)}</div></div><div class="level"><div class="level-label">TP1</div><div class="level-value">${money(alert.tp1)}</div></div><div class="level"><div class="level-label">TP2</div><div class="level-value">${money(alert.tp2)}</div></div></div>
@@ -1210,6 +1236,14 @@ def _infer_direction(a: Alert) -> str:
     return "BULLISH"
 
 
+def _format_oi_trend(a: Alert) -> str:
+    days = a.oi_days_growing or 0
+    if not a.oi_growing or days < 1:
+        return "--"
+    suffix = f" ({round(a.oi_change_pct, 2)}%)" if a.oi_change_pct is not None else ""
+    return f"OI ↑ {days}d{suffix}"
+
+
 @app.get("/backtesting", response_class=HTMLResponse)
 async def backtesting_page(db: Session = Depends(get_db)):
     alerts = (
@@ -1236,6 +1270,7 @@ async def backtesting_page(db: Session = Depends(get_db)):
                 <button class="copy-btn" data-contract="" onclick="copyIBKR(this)" title="Copiar contrato IBKR">📋</button>
             </td>
             <td>${round((a.premium or 0) / 1_000_000, 1)}M</td>
+            <td>{escape(_format_oi_trend(a))}</td>
             <td>{a.score_total or 0}/100</td>
             <td>{escape(a.icc_phase or "--")}</td>
             <td class="pnl {'win' if (a.pnl_pct or 0) > 0 else 'loss' if (a.pnl_pct or 0) < 0 else ''}">{'+' if (a.pnl_pct or 0) > 0 else ''}{round(a.pnl_pct, 2) if a.pnl_pct is not None else '--'}{'%' if a.pnl_pct is not None else ''}</td>
@@ -1315,10 +1350,10 @@ async def backtesting_page(db: Session = Depends(get_db)):
         <table>
             <thead>
                 <tr>
-                    <th>Fecha Entrada</th><th>Ticker</th><th>Contrato</th><th>Nominal</th><th>Score</th><th>Dirección</th><th>P&L%</th><th>Status</th>
+                    <th>Fecha Entrada</th><th>Ticker</th><th>Contrato</th><th>Nominal</th><th>OI Trend</th><th>Score</th><th>Dirección</th><th>P&L%</th><th>Status</th>
                 </tr>
             </thead>
-            <tbody>""" + (rows or '<tr><td colspan="8">No hay backtests cargados.</td></tr>') + """</tbody>
+            <tbody>""" + (rows or '<tr><td colspan="9">No hay backtests cargados.</td></tr>') + """</tbody>
         </table>
     </section>
     <script>
@@ -1375,6 +1410,18 @@ def _serialize_alert(a: Alert) -> dict:
         "delta":     a.delta,
         "premium":   a.premium,
         "nominal_value": a.premium,
+        "oi_growing": bool(a.oi_growing),
+        "oi_change_pct": a.oi_change_pct or 0,
+        "oi_days_growing": a.oi_days_growing or 0,
+        "oi_today": a.oi_today,
+        "oi_yesterday": a.oi_yesterday,
+        "oi": {
+            "oi_growing": bool(a.oi_growing),
+            "oi_change_pct": a.oi_change_pct or 0,
+            "days_growing": a.oi_days_growing or 0,
+            "today_oi": a.oi_today,
+            "yesterday_oi": a.oi_yesterday,
+        },
         "signal":    a.signal_summary,
         "regime":    a.regime,
         "session":   a.market_session,

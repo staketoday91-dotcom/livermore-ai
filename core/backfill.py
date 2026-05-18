@@ -123,6 +123,42 @@ async def fetch_option_historic(client: httpx.AsyncClient, contract: str) -> lis
     return payload.get("chains", payload.get("data", payload if isinstance(payload, list) else []))
 
 
+async def fetch_oi_change(client: httpx.AsyncClient, ticker: str) -> dict:
+    response = await client.get(
+        f"{UW_BASE}/stock/{ticker}/option-volume-history",
+        headers=_headers(),
+        params={"limit": 3},
+    )
+    if response.status_code != 200:
+        return {"oi_growing": False, "oi_change_pct": 0, "days_growing": 0}
+
+    data = response.json().get("data", [])
+    if len(data) < 2:
+        return {"oi_growing": False, "oi_change_pct": 0, "days_growing": 0}
+
+    sorted_data = sorted(data, key=lambda x: x.get("date", ""), reverse=True)
+    today_oi = _float(sorted_data[0].get("open_interest", 0))
+    yesterday_oi = _float(sorted_data[1].get("open_interest", 0))
+    oi_change_pct = ((today_oi - yesterday_oi) / yesterday_oi * 100) if yesterday_oi > 0 else 0
+
+    days_growing = 0
+    for i in range(len(sorted_data) - 1):
+        curr = _float(sorted_data[i].get("open_interest", 0))
+        prev = _float(sorted_data[i + 1].get("open_interest", 0))
+        if curr > prev:
+            days_growing += 1
+        else:
+            break
+
+    return {
+        "oi_growing": oi_change_pct > 0,
+        "oi_change_pct": round(oi_change_pct, 2),
+        "days_growing": days_growing,
+        "today_oi": int(today_oi),
+        "yesterday_oi": int(yesterday_oi),
+    }
+
+
 def _price_from_historic(row: dict) -> float:
     return _float(_pick(row, "last_price", "close", "avg_price", "price", default=0))
 
@@ -195,7 +231,7 @@ def _dark_pool_signal(rows: list[dict], current_price: float) -> DarkPoolSignal 
     )
 
 
-def _score_backtest(data: dict, dark_pool: DarkPoolSignal | None):
+def _score_backtest(data: dict, dark_pool: DarkPoolSignal | None, oi_data: dict):
     nominal_value = _nominal_value(data)
     volume = _int(_pick(data, "volume", "total_volume", default=0))
     open_interest = max(_int(_pick(data, "open_interest", "oi", default=1), 1), 1)
@@ -243,6 +279,7 @@ def _score_backtest(data: dict, dark_pool: DarkPoolSignal | None):
         macro=macro,
         adx=25.0,
         regime="BACKTEST_TRENDING",
+        oi_data=oi_data,
     )
     return result, nominal_value, direction, options
 
@@ -277,12 +314,15 @@ async def main():
     max_score = 0
     dark_pool_cache: dict[str, list[dict]] = {}
     historic_cache: dict[str, list[dict]] = {}
+    oi_cache: dict[str, dict] = {}
 
     async with httpx.AsyncClient(timeout=30) as client:
         for row in rows:
             ticker = _ticker(row)
             if ticker and ticker not in dark_pool_cache:
                 dark_pool_cache[ticker] = await fetch_dark_pool(client, ticker)
+            if ticker and ticker not in oi_cache:
+                oi_cache[ticker] = await fetch_oi_change(client, ticker)
             contract = _contract(row)
             if contract and contract not in historic_cache:
                 historic_cache[contract] = await fetch_option_historic(client, contract)
@@ -304,7 +344,8 @@ async def main():
 
             current_price = _float(_pick(row, "underlying_price", "spot_price", "price", default=0))
             dark_pool = _dark_pool_signal(dark_pool_cache.get(ticker, []), current_price)
-            score, nominal_value, direction, options = _score_backtest(row, dark_pool)
+            oi_data = oi_cache.get(ticker, {"oi_growing": False, "oi_change_pct": 0, "days_growing": 0})
+            score, nominal_value, direction, options = _score_backtest(row, dark_pool, oi_data)
             result_status, pnl_pct = _result_from_prices(row, historic_cache.get(options.contract, []))
             max_score = max(max_score, score.total)
             alert = Alert(
@@ -330,6 +371,11 @@ async def main():
                 volume=options.volume,
                 open_interest=options.open_interest,
                 vol_oi_ratio=options.vol_oi_ratio,
+                oi_growing=bool(oi_data.get("oi_growing")),
+                oi_change_pct=oi_data.get("oi_change_pct", 0),
+                oi_days_growing=oi_data.get("days_growing", 0),
+                oi_today=oi_data.get("today_oi"),
+                oi_yesterday=oi_data.get("yesterday_oi"),
                 dp_print_price=dark_pool.print_price if dark_pool else None,
                 dp_print_size=dark_pool.print_size if dark_pool else None,
                 dp_above_vwap=dark_pool.above_vwap if dark_pool else None,
