@@ -16,6 +16,39 @@ UW_TOKEN = os.getenv("UNUSUAL_WHALES_TOKEN", "")
 UW_BASE  = "https://api.unusualwhales.com/api"
 
 
+def _float(value, default: float = 0.0) -> float:
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _with_nominal_value(alert: dict) -> dict:
+    enriched = dict(alert)
+    total_premium = _float(enriched.get("total_premium"))
+    if total_premium > 0:
+        enriched["nominal_value"] = total_premium
+        return enriched
+
+    contracts = _float(
+        enriched.get("contracts")
+        or enriched.get("volume")
+        or enriched.get("total_volume")
+        or enriched.get("size")
+        or enriched.get("quantity")
+    )
+    premium = _float(
+        enriched.get("premium")
+        or enriched.get("price")
+        or enriched.get("avg_price")
+        or enriched.get("last_price")
+    )
+    enriched["nominal_value"] = contracts * premium * 100
+    return enriched
+
+
 def _headers():
     return {
         "Authorization": f"Bearer {UW_TOKEN}",
@@ -31,7 +64,7 @@ class UWFetcher:
 
     # ─── OPTIONS FLOW ────────────────────────────────────────────────────────
 
-    async def get_flow_alerts(self, min_premium: float = 100_000) -> list[dict]:
+    async def get_flow_alerts(self, min_premium: float = 500_000) -> list[dict]:
         """Flow alerts con filtro de premium minimo."""
         async with httpx.AsyncClient(timeout=15) as client:
             r = await client.get(
@@ -43,9 +76,10 @@ class UWFetcher:
             logger.error(f"flow_alerts error {r.status_code}")
             return []
         data = r.json().get("data", [])
+        enriched = [_with_nominal_value(d) for d in data]
         return [
-            d for d in data
-            if float(d.get("total_premium", 0)) >= min_premium
+            d for d in enriched
+            if _float(d.get("nominal_value")) >= min_premium
         ]
 
     async def get_ticker_flow(self, ticker: str) -> list[dict]:
@@ -58,7 +92,7 @@ class UWFetcher:
             )
         if r.status_code != 200:
             return []
-        return r.json().get("data", [])
+        return [_with_nominal_value(d) for d in r.json().get("data", [])]
 
     # ─── DARK POOL ───────────────────────────────────────────────────────────
 

@@ -1083,6 +1083,13 @@ async def professional_dashboard():
         function escapeHtml(value) { return String(value ?? "").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;").replaceAll("'","&#039;"); }
         function fmt(value, fallback = "--") { return value === null || value === undefined || value === "" ? fallback : value; }
         function money(value) { const n = Number(value); return Number.isFinite(n) && n > 0 ? "$" + n.toFixed(2) : "--"; }
+        function compactMoney(value) {
+            const n = Number(value);
+            if (!Number.isFinite(n) || n <= 0) return "--";
+            if (n >= 1_000_000) return "$" + (n / 1_000_000).toFixed(1).replace(/\\.0$/, "") + "M";
+            if (n >= 1_000) return "$" + (n / 1_000).toFixed(0) + "K";
+            return "$" + n.toFixed(0);
+        }
         function pct(value) { const n = Number(value); return Number.isFinite(n) ? `${n >= 0 ? "+" : ""}${n.toFixed(2)}%` : "--"; }
         function scoreValue(value) { const score = Number(value ?? 0); return Number.isFinite(score) ? Math.max(0, Math.min(100, score)) : 0; }
         function tierLabel(tier) { const value = Number(tier ?? 1); if (value >= 3) return "LIVERMORE"; if (value === 2) return "PREMIUM"; return "ALERT"; }
@@ -1125,7 +1132,7 @@ async def professional_dashboard():
                 return `<article class="alert-card">
                     <div class="alert-top"><div class="alert-title"><span class="ticker">${escapeHtml(alert.ticker)}</span><span class="tier ${tierClass(alert.tier)}">${tierLabel(alert.tier)}</span></div><div class="score-big">${score}<span>/100</span></div></div>
                     <div class="direction-line ${dirClass}"><span class="direction-arrow">${direction === "BEARISH" ? "↓" : "↑"}</span><span>${direction}</span></div>
-                    <div class="contract-row"><span class="contract">${escapeHtml(fmt(ibkr,"N/A"))}</span>${contract ? `<button class="copy-btn" data-contract="${escapeHtml(ibkr)}" onclick="copyIBKR(this)">COPIAR</button>` : ""}</div>
+                    <div class="contract-row"><span class="contract">${escapeHtml(fmt(ibkr,"N/A"))}</span><span class="score-num">${compactMoney(alert.nominal_value ?? alert.premium)}</span>${contract ? `<button class="copy-btn" data-contract="${escapeHtml(ibkr)}" onclick="copyIBKR(this)">COPIAR</button>` : ""}</div>
                     <div class="levels"><div class="level"><div class="level-label">Entry</div><div class="level-value">${money(alert.entry)}</div></div><div class="level"><div class="level-label">SL</div><div class="level-value">${money(alert.sl)}</div></div><div class="level"><div class="level-label">TP1</div><div class="level-value">${money(alert.tp1)}</div></div><div class="level"><div class="level-label">TP2</div><div class="level-value">${money(alert.tp2)}</div></div></div>
                     <div class="breakdown">${parts.map(([label, value]) => { const s = scoreValue(value); return `<div><div class="break-label"><span>${label}</span><span>${s}</span></div><div class="bar"><div class="bar-fill" style="width:${s}%"></div></div></div>`; }).join("")}</div>
                     <div class="signals">${escapeHtml(signals || "Sin señales activas registradas.")}</div><div class="timestamp">${minutesAgo(alert.date)}</div>
@@ -1228,6 +1235,7 @@ async def backtesting_page(db: Session = Depends(get_db)):
                 <a class="ibkr-contract" data-raw="{escape(a.contract or '', quote=True)}" data-ticker="{escape(a.ticker or '', quote=True)}" href="#" target="_blank" rel="noopener">{escape(a.contract or "--")}</a>
                 <button class="copy-btn" data-contract="" onclick="copyIBKR(this)" title="Copiar contrato IBKR">📋</button>
             </td>
+            <td>${round((a.premium or 0) / 1_000_000, 1)}M</td>
             <td>{a.score_total or 0}/100</td>
             <td>{escape(a.icc_phase or "--")}</td>
             <td class="pnl {'win' if (a.pnl_pct or 0) > 0 else 'loss' if (a.pnl_pct or 0) < 0 else ''}">{'+' if (a.pnl_pct or 0) > 0 else ''}{round(a.pnl_pct, 2) if a.pnl_pct is not None else '--'}{'%' if a.pnl_pct is not None else ''}</td>
@@ -1307,10 +1315,10 @@ async def backtesting_page(db: Session = Depends(get_db)):
         <table>
             <thead>
                 <tr>
-                    <th>Fecha Entrada</th><th>Ticker</th><th>Contrato</th><th>Score</th><th>Dirección</th><th>P&L%</th><th>Status</th>
+                    <th>Fecha Entrada</th><th>Ticker</th><th>Contrato</th><th>Nominal</th><th>Score</th><th>Dirección</th><th>P&L%</th><th>Status</th>
                 </tr>
             </thead>
-            <tbody>""" + (rows or '<tr><td colspan="7">No hay backtests cargados.</td></tr>') + """</tbody>
+            <tbody>""" + (rows or '<tr><td colspan="8">No hay backtests cargados.</td></tr>') + """</tbody>
         </table>
     </section>
     <script>
@@ -1366,6 +1374,7 @@ def _serialize_alert(a: Alert) -> dict:
         "expiration":a.expiration,
         "delta":     a.delta,
         "premium":   a.premium,
+        "nominal_value": a.premium,
         "signal":    a.signal_summary,
         "regime":    a.regime,
         "session":   a.market_session,
@@ -1427,9 +1436,9 @@ async def alerts_page():
         <div class="panel-head">Feed activo — auto-refresh 30s</div>
         <table>
             <thead>
-                <tr><th>Fecha</th><th>Ticker</th><th>Score</th><th>Tier</th><th>Dirección</th><th>Contrato</th><th>Entry</th><th>SL</th><th>TP1</th><th>TP2</th><th>Status</th></tr>
+                <tr><th>Fecha</th><th>Ticker</th><th>Score</th><th>Tier</th><th>Dirección</th><th>Contrato</th><th>Nominal</th><th>Entry</th><th>SL</th><th>TP1</th><th>TP2</th><th>Status</th></tr>
             </thead>
-            <tbody id="alertsBody"><tr><td colspan="11" class="empty">Cargando alertas...</td></tr></tbody>
+            <tbody id="alertsBody"><tr><td colspan="12" class="empty">Cargando alertas...</td></tr></tbody>
         </table>
     </section>
     <script>
@@ -1459,6 +1468,13 @@ async def alerts_page():
             const n = Number(value);
             return Number.isFinite(n) && n > 0 ? "$" + n.toFixed(2) : "--";
         }
+        function fmtNominal(value) {
+            const n = Number(value);
+            if (!Number.isFinite(n) || n <= 0) return "--";
+            if (n >= 1_000_000) return "$" + (n / 1_000_000).toFixed(1).replace(/\\.0$/, "") + "M";
+            if (n >= 1_000) return "$" + (n / 1_000).toFixed(0) + "K";
+            return "$" + n.toFixed(0);
+        }
         function fmtDate(value) {
             if (!value) return "--";
             return new Intl.DateTimeFormat("es-US", { timeZone:"America/New_York", month:"short", day:"numeric", hour:"numeric", minute:"2-digit" }).format(new Date(value));
@@ -1468,7 +1484,7 @@ async def alerts_page():
             try {
                 const alerts = await fetch("/api/alerts?limit=200", { cache:"no-store" }).then(r => r.json());
                 if (!alerts.length) {
-                    body.innerHTML = `<tr><td colspan="11" class="empty">No hay alertas activas.</td></tr>`;
+                    body.innerHTML = `<tr><td colspan="12" class="empty">No hay alertas activas.</td></tr>`;
                     return;
                 }
                 body.innerHTML = alerts.map((a) => {
@@ -1477,11 +1493,11 @@ async def alerts_page():
                     const contract = ibkr ? `<a class="ibkr-contract" href="https://www.interactivebrokers.com/en/trading/contract-search.php?symbol=${encodeURIComponent(a.ticker || "")}" target="_blank" rel="noopener">${escapeHtml(ibkr)}</a><button class="copy-btn" data-contract="${escapeHtml(ibkr)}" onclick="copyIBKR(this)">📋</button>` : "--";
                     return `<tr>
                         <td>${fmtDate(a.date)}</td><td class="ticker">${escapeHtml(a.ticker)}</td><td>${a.score ?? 0}/100</td><td class="tier">${tierLabel(a.tier)}</td>
-                        <td>${escapeHtml(a.direction || "--")}</td><td>${contract}</td><td>${fmtMoney(a.entry)}</td><td>${fmtMoney(a.sl)}</td><td>${fmtMoney(a.tp1)}</td><td>${fmtMoney(a.tp2)}</td><td>${escapeHtml(a.status || "--")}</td>
+                        <td>${escapeHtml(a.direction || "--")}</td><td>${contract}</td><td>${fmtNominal(a.nominal_value ?? a.premium)}</td><td>${fmtMoney(a.entry)}</td><td>${fmtMoney(a.sl)}</td><td>${fmtMoney(a.tp1)}</td><td>${fmtMoney(a.tp2)}</td><td>${escapeHtml(a.status || "--")}</td>
                     </tr>`;
                 }).join("");
             } catch (error) {
-                body.innerHTML = `<tr><td colspan="11" class="empty">Error cargando alertas: ${escapeHtml(error.message)}</td></tr>`;
+                body.innerHTML = `<tr><td colspan="12" class="empty">Error cargando alertas: ${escapeHtml(error.message)}</td></tr>`;
             }
         }
         loadAlerts();

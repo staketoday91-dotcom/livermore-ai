@@ -161,23 +161,27 @@ class LivermoreScanner:
 
         # ─── 10. Construir señal de opciones flow ─────────────
         opt_signal = None
-        if flow_alerts:
-            best = max(flow_alerts, key=lambda f: float(f.get("total_premium", 0)))
-            total_prem = float(best.get("total_premium", 0))
+        eligible_flow_alerts = [
+            flow for flow in flow_alerts
+            if float(flow.get("nominal_value", 0) or 0) >= 500_000
+        ]
+        if eligible_flow_alerts:
+            best = max(eligible_flow_alerts, key=lambda f: float(f.get("nominal_value", 0) or 0))
+            nominal_value = float(best.get("nominal_value", 0) or 0)
             vol_oi     = float(best.get("volume_oi_ratio", 0))
             has_sweep  = best.get("has_sweep", False)
             has_floor  = best.get("has_floor", False)
             ask_prem   = float(best.get("total_ask_side_prem", 0))
-            executed_ask = ask_prem / total_prem if total_prem > 0 else 0
+            executed_ask = ask_prem / nominal_value if nominal_value > 0 else 0
 
-            is_golden = (has_sweep or has_floor) and total_prem >= 500_000 and vol_oi >= 5
+            is_golden = (has_sweep or has_floor) and nominal_value >= 10_000_000
 
             opt_signal = OptionsFlowSignal(
                 volume=int(best.get("volume", 0)),
                 open_interest=int(best.get("open_interest", 1)),
                 vol_oi_ratio=vol_oi,
                 executed_ask=executed_ask,
-                premium_total=total_prem,
+                nominal_value=nominal_value,
                 is_sweep=has_sweep,
                 is_golden_sweep=is_golden,
                 delta=0.50,
@@ -224,9 +228,11 @@ class LivermoreScanner:
 
         # ─── 15. Contrato recomendado del flow alert ──────────
         contract_label = ""
-        if flow_alerts:
-            best = max(flow_alerts, key=lambda f: float(f.get("total_premium", 0)))
+        nominal_value = None
+        if eligible_flow_alerts:
+            best = max(eligible_flow_alerts, key=lambda f: float(f.get("nominal_value", 0) or 0))
             contract_label = best.get("option_chain", "")
+            nominal_value = float(best.get("nominal_value", 0) or 0)
 
         return {
             "ticker":     ticker,
@@ -245,7 +251,8 @@ class LivermoreScanner:
             "strike":     None,
             "expiration": None,
             "delta":      None,
-            "premium":    None,
+            "premium":    nominal_value,
+            "nominal_value": nominal_value,
             "reason":     score_result.reason,
             "score_breakdown": {
                 "icc":      score_result.icc,
@@ -297,6 +304,7 @@ class LivermoreScanner:
                 target1=result["target1"],
                 target2=result["target2"],
                 contract=result.get("contract", ""),
+                premium=result.get("nominal_value"),
                 signal_summary=result["reason"],
                 icc_phase=result["icc_phase"],
                 icc_signal=result["icc_signal"],

@@ -88,6 +88,16 @@ def _direction(data: dict) -> str:
     return "BULLISH"
 
 
+def _nominal_value(data: dict) -> float:
+    total_premium = _float(_pick(data, "total_premium", default=0))
+    if total_premium > 0:
+        return total_premium
+
+    contracts = _float(_pick(data, "contracts", "volume", "total_volume", "size", "quantity", default=0))
+    premium = _float(_pick(data, "premium", "price", "avg_price", "last_price", default=0))
+    return contracts * premium * 100
+
+
 async def fetch_dark_pool(client: httpx.AsyncClient, ticker: str) -> list[dict]:
     response = await client.get(
         f"{UW_BASE}/darkpool/{ticker}",
@@ -186,12 +196,12 @@ def _dark_pool_signal(rows: list[dict], current_price: float) -> DarkPoolSignal 
 
 
 def _score_backtest(data: dict, dark_pool: DarkPoolSignal | None):
-    premium = _float(_pick(data, "total_premium", "premium", "ask_side_premium", default=0))
+    nominal_value = _nominal_value(data)
     volume = _int(_pick(data, "volume", "total_volume", default=0))
     open_interest = max(_int(_pick(data, "open_interest", "oi", default=1), 1), 1)
     vol_oi = _float(_pick(data, "volume_oi_ratio", "vol_oi_ratio", default=volume / open_interest))
-    ask_premium = _float(_pick(data, "total_ask_side_prem", "ask_side_premium", default=premium))
-    executed_ask = ask_premium / premium if premium > 0 else 0
+    ask_premium = _float(_pick(data, "total_ask_side_prem", "ask_side_premium", default=nominal_value))
+    executed_ask = ask_premium / nominal_value if nominal_value > 0 else 0
     is_sweep = _bool(_pick(data, "has_sweep", "is_sweep", "sweep", default=False))
     is_floor = _bool(_pick(data, "has_floor", "floor", default=False))
     delta = abs(_float(_pick(data, "delta", default=0.5), 0.5))
@@ -200,7 +210,7 @@ def _score_backtest(data: dict, dark_pool: DarkPoolSignal | None):
     direction = _direction(data)
 
     icc_score = 25
-    if premium >= 500_000:
+    if nominal_value >= 500_000:
         icc_score += 5
     if executed_ask >= 0.70:
         icc_score += 5
@@ -210,9 +220,9 @@ def _score_backtest(data: dict, dark_pool: DarkPoolSignal | None):
         open_interest=open_interest,
         vol_oi_ratio=vol_oi,
         executed_ask=executed_ask,
-        premium_total=premium,
+        nominal_value=nominal_value,
         is_sweep=is_sweep,
-        is_golden_sweep=(is_sweep or is_floor) and premium >= 500_000 and vol_oi >= 5,
+        is_golden_sweep=(is_sweep or is_floor) and nominal_value >= 10_000_000,
         delta=delta if delta > 0 else 0.5,
         iv_rank=iv_rank,
         expiration_dte=dte,
@@ -234,7 +244,7 @@ def _score_backtest(data: dict, dark_pool: DarkPoolSignal | None):
         adx=25.0,
         regime="BACKTEST_TRENDING",
     )
-    return result, premium, direction, options
+    return result, nominal_value, direction, options
 
 
 def _tier_num(score: int) -> int:
@@ -284,8 +294,8 @@ async def main():
         print(f"Backtest previo borrado: {deleted} alertas")
 
         for row in rows:
-            premium = _float(_pick(row, "total_premium", "premium", "ask_side_premium", default=0))
-            if premium <= 100_000:
+            nominal_value = _nominal_value(row)
+            if nominal_value < 500_000:
                 continue
 
             ticker = _ticker(row)
@@ -294,7 +304,7 @@ async def main():
 
             current_price = _float(_pick(row, "underlying_price", "spot_price", "price", default=0))
             dark_pool = _dark_pool_signal(dark_pool_cache.get(ticker, []), current_price)
-            score, premium, direction, options = _score_backtest(row, dark_pool)
+            score, nominal_value, direction, options = _score_backtest(row, dark_pool)
             result_status, pnl_pct = _result_from_prices(row, historic_cache.get(options.contract, []))
             max_score = max(max_score, score.total)
             alert = Alert(
@@ -316,7 +326,7 @@ async def main():
                 strike=_float(_pick(row, "strike", "strike_price", default=0)) or None,
                 expiration=_pick(row, "expiration", "expiry", "expiry_date", "expiration_date", default=None),
                 delta=options.delta,
-                premium=premium,
+                premium=nominal_value,
                 volume=options.volume,
                 open_interest=options.open_interest,
                 vol_oi_ratio=options.vol_oi_ratio,

@@ -26,7 +26,7 @@ class OptionsFlowSignal:
     open_interest:  int
     vol_oi_ratio:   float
     executed_ask:   float           # % executed at ask
-    premium_total:  float           # total premium in dollars
+    nominal_value:  float           # contracts * premium * 100, in dollars
     is_sweep:       bool
     is_golden_sweep:bool
     delta:          float
@@ -160,43 +160,21 @@ class LivermoreScorer:
         if options_flow:
             opt = options_flow
 
-            # Vol/OI ratio
-            if opt.vol_oi_ratio >= 5:
-                score_opt += 8
-                reasons.append(f"Volumen {opt.vol_oi_ratio:.1f}x el OI")
-            elif opt.vol_oi_ratio >= 3:
-                score_opt += 5
-
-            # Ask execution
-            if opt.executed_ask >= 0.85:
-                score_opt += 5
-                reasons.append(f"{opt.executed_ask*100:.0f}% ejecutado en ask")
-            elif opt.executed_ask >= 0.70:
-                score_opt += 3
-
-            # Premium size
-            if opt.premium_total >= 500_000:
-                score_opt += 5
-            elif opt.premium_total >= 100_000:
-                score_opt += 3
-
-            # Sweep / Golden sweep
-            if opt.is_golden_sweep:
-                score_opt += 7
-                reasons.append("GOLDEN SWEEP detectado")
-            elif opt.is_sweep:
-                score_opt += 4
-                reasons.append("Sweep agresivo en ask")
-
-            # Contract quality
-            if 0.35 <= opt.delta <= 0.65:
-                score_opt += 3
-            if opt.iv_rank <= 60:
-                score_opt += 2
-
-            # Expiration quality for swing
-            if 21 <= opt.expiration_dte <= 60:
-                score_opt += 2
+            nominal = opt.nominal_value
+            if nominal < 500_000:
+                score_opt = 0
+            elif nominal < 1_000_000:
+                score_opt = 5
+                reasons.append(f"Options flow ${nominal/1_000_000:.1f}M")
+            elif nominal < 3_000_000:
+                score_opt = 10
+                reasons.append(f"Options flow interesante ${nominal/1_000_000:.1f}M")
+            elif nominal < 10_000_000:
+                score_opt = 18
+                reasons.append(f"Options flow institucional ${nominal/1_000_000:.1f}M")
+            else:
+                score_opt = 25
+                reasons.append(f"Ballena confirmada ${nominal/1_000_000:.1f}M")
 
             contract = opt.contract
             score_opt = min(score_opt, 25)
