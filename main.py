@@ -92,6 +92,7 @@ def _ensure_schema():
             "repeated_flow": "BOOLEAN DEFAULT FALSE",
             "flow_count": "INTEGER DEFAULT 0",
             "accumulated_nominal": "FLOAT DEFAULT 0",
+            "is_single_leg": "BOOLEAN DEFAULT TRUE",
         }
         with engine.connect() as conn:
             for col, col_type in missing_columns.items():
@@ -1012,6 +1013,8 @@ async def professional_dashboard():
         .phase.oi-strong { color:var(--green); background:rgba(39,209,127,.11); border-color:rgba(39,209,127,.32); }
         .phase.ladder { color:var(--gold); background:rgba(201,168,76,.16); border-color:rgba(201,168,76,.48); }
         .phase.repeated { color:var(--amber); background:rgba(232,146,26,.14); border-color:rgba(232,146,26,.36); }
+        .phase.single-leg { color:var(--green); background:rgba(39,209,127,.11); border-color:rgba(39,209,127,.32); }
+        .phase.multi-leg { color:var(--red); background:rgba(255,92,92,.12); border-color:rgba(255,92,92,.32); }
         .category-badge.stock { color:#93c5fd; background:rgba(96,165,250,.12); border-color:rgba(96,165,250,.32); }
         .category-badge.etf { color:var(--amber); background:rgba(232,146,26,.14); border-color:rgba(232,146,26,.36); }
         .category-badge.index { color:var(--red); background:rgba(255,92,92,.12); border-color:rgba(255,92,92,.32); }
@@ -1166,6 +1169,11 @@ async def professional_dashboard():
         }
         function ladderBadge(alert) { return alert.has_ladder ? `<span class="phase ladder">ESCALERA</span>` : ""; }
         function repeatedBadge(alert) { return alert.repeated_flow ? `<span class="phase repeated">FLUJO REPETIDO</span>` : ""; }
+        function legBadge(alert) {
+            return alert.is_single_leg === false
+                ? `<span class="phase multi-leg">MULTI-LEG</span>`
+                : `<span class="phase single-leg">SINGLE LEG</span>`;
+        }
         function toIBKR(raw) { const m = String(raw || "").match(/^([A-Z]+)(\\d{6})([CP])(\\d{8})$/); if (!m) return raw || ""; return m[1] + " " + m[2] + m[3] + " " + (parseInt(m[4]) / 1000).toString(); }
         async function copyIBKR(button) { const text = button.dataset.contract || ""; if (!text) return; await navigator.clipboard.writeText(text); button.textContent = "COPIADO"; setTimeout(() => { button.textContent = "COPIAR"; }, 1000); }
         async function getJson(url) { const response = await fetch(url, { cache:"no-store" }); if (!response.ok) throw new Error(`${response.status} ${response.statusText}`); return response.json(); }
@@ -1195,7 +1203,7 @@ async def professional_dashboard():
                 const ibkr = contract ? toIBKR(contract) : "N/A", direction = directionLabel(alert), dirClass = direction === "BEARISH" ? "bearish" : "bullish";
                 const signals = [alert.icc_phase ? `ICC ${alert.icc_phase}` : null, alert.regime, alert.session, alert.signal].filter(Boolean).join(" · ");
                 return `<article class="alert-card">
-                    <div class="alert-top"><div class="alert-title"><span class="ticker">${escapeHtml(alert.ticker)}</span>${categoryBadge(alert.category)}<span class="tier ${tierClass(alert.tier)}">${tierLabel(alert.tier)}</span>${oiBadge(alert)}${ladderBadge(alert)}${repeatedBadge(alert)}</div><div class="score-big">${score}<span>/100</span></div></div>
+                    <div class="alert-top"><div class="alert-title"><span class="ticker">${escapeHtml(alert.ticker)}</span>${categoryBadge(alert.category)}<span class="tier ${tierClass(alert.tier)}">${tierLabel(alert.tier)}</span>${legBadge(alert)}${oiBadge(alert)}${ladderBadge(alert)}${repeatedBadge(alert)}</div><div class="score-big">${score}<span>/100</span></div></div>
                     <div class="direction-line ${dirClass}"><span class="direction-arrow">${direction === "BEARISH" ? "↓" : "↑"}</span><span>${direction}</span></div>
                     <div class="contract-row"><span class="contract">${escapeHtml(fmt(ibkr,"N/A"))}</span><span class="score-num">${compactMoney(alert.nominal_value ?? alert.premium)}</span>${contract ? `<button class="copy-btn" data-contract="${escapeHtml(ibkr)}" onclick="copyIBKR(this)">COPIAR</button>` : ""}</div>
                     <div class="levels"><div class="level"><div class="level-label">Entry</div><div class="level-value">${money(alert.entry)}</div></div><div class="level"><div class="level-label">SL</div><div class="level-value">${money(alert.sl)}</div></div><div class="level"><div class="level-label">TP1</div><div class="level-value">${money(alert.tp1)}</div></div><div class="level"><div class="level-label">TP2</div><div class="level-value">${money(alert.tp2)}</div></div></div>
@@ -1311,6 +1319,7 @@ async def backtesting_page(db: Session = Depends(get_db)):
             <td>{escape(_format_et(a.created_at))}</td>
             <td class="ticker">{escape(a.ticker or "--")}</td>
             <td>{escape(a.category or "STOCK")}</td>
+            <td>{"SINGLE" if a.is_single_leg else "MULTI"}</td>
             <td>
                 <a class="ibkr-contract" data-raw="{escape(a.contract or '', quote=True)}" data-ticker="{escape(a.ticker or '', quote=True)}" href="#" target="_blank" rel="noopener">{escape(a.contract or "--")}</a>
                 <button class="copy-btn" data-contract="" onclick="copyIBKR(this)" title="Copiar contrato IBKR">📋</button>
@@ -1398,10 +1407,10 @@ async def backtesting_page(db: Session = Depends(get_db)):
         <table>
             <thead>
                 <tr>
-                    <th>Fecha Entrada</th><th>Ticker</th><th>Categoría</th><th>Contrato</th><th>Nominal</th><th>OI Trend</th><th>Escalera</th><th>Flujo Repetido</th><th>Score</th><th>Dirección</th><th>P&L%</th><th>Status</th>
+                    <th>Fecha Entrada</th><th>Ticker</th><th>Categoría</th><th>Tipo</th><th>Contrato</th><th>Nominal</th><th>OI Trend</th><th>Escalera</th><th>Flujo Repetido</th><th>Score</th><th>Dirección</th><th>P&L%</th><th>Status</th>
                 </tr>
             </thead>
-            <tbody>""" + (rows or '<tr><td colspan="12">No hay backtests cargados.</td></tr>') + """</tbody>
+            <tbody>""" + (rows or '<tr><td colspan="13">No hay backtests cargados.</td></tr>') + """</tbody>
         </table>
     </section>
     <script>
@@ -1478,6 +1487,7 @@ def _serialize_alert(a: Alert) -> dict:
         "repeated_flow": bool(a.repeated_flow),
         "flow_count": a.flow_count or 0,
         "accumulated_nominal": a.accumulated_nominal or a.premium or 0,
+        "is_single_leg": bool(a.is_single_leg),
         "signal":    a.signal_summary,
         "regime":    a.regime,
         "session":   a.market_session,

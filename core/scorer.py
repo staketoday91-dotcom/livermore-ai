@@ -28,6 +28,7 @@ class OptionsFlowSignal:
     executed_ask:   float           # % executed at ask
     nominal_value:  float           # contracts * premium * 100, in dollars
     is_sweep:       bool
+    has_floor:      bool
     is_golden_sweep:bool
     delta:          float
     iv_rank:        float
@@ -36,6 +37,7 @@ class OptionsFlowSignal:
     repeated_flow:  bool = False
     flow_count:     int = 0
     accumulated_nominal: float = 0
+    is_single_leg:  bool = True
     score:          int = 0
 
 
@@ -217,6 +219,13 @@ class LivermoreScorer:
 
             if opt.accumulated_nominal > 2_000_000:
                 reasons.append(f"Acumulacion en contrato ${opt.accumulated_nominal/1_000_000:.1f}M")
+
+            if not opt.is_single_leg:
+                score_opt = round(score_opt * 0.5)
+                reasons.append("Multi-leg detectado — señal direccional reducida")
+            elif opt.is_sweep or opt.has_floor:
+                score_opt = min(25, round(score_opt * 1.15))
+                reasons.append("Single-leg confirmado — señal direccional limpia")
 
             contract = opt.contract
             score_opt = min(score_opt, 25)

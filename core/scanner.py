@@ -186,6 +186,7 @@ class LivermoreScanner:
                 executed_ask=executed_ask,
                 nominal_value=nominal_value,
                 is_sweep=has_sweep,
+                has_floor=has_floor,
                 is_golden_sweep=is_golden,
                 delta=0.50,
                 iv_rank=iv_rank,
@@ -194,6 +195,7 @@ class LivermoreScanner:
                 repeated_flow=bool(best.get("repeated_flow")),
                 flow_count=int(best.get("flow_count", 0) or 0),
                 accumulated_nominal=float(best.get("accumulated_nominal", nominal_value) or nominal_value),
+                is_single_leg=bool(best.get("is_single_leg", True)),
             )
 
         # ─── 11. Macro context ────────────────────────────────
@@ -268,6 +270,7 @@ class LivermoreScanner:
             "repeated_flow": bool(best.get("repeated_flow")) if eligible_flow_alerts else False,
             "flow_count": int(best.get("flow_count", 0) or 0) if eligible_flow_alerts else 0,
             "accumulated_nominal": float(best.get("accumulated_nominal", 0) or 0) if eligible_flow_alerts else 0,
+            "is_single_leg": bool(best.get("is_single_leg", True)) if eligible_flow_alerts else True,
             "reason":     score_result.reason,
             "score_breakdown": {
                 "icc":      score_result.icc,
@@ -333,6 +336,7 @@ class LivermoreScanner:
                 repeated_flow=bool(result.get("repeated_flow")),
                 flow_count=result.get("flow_count", 0),
                 accumulated_nominal=result.get("accumulated_nominal", 0),
+                is_single_leg=bool(result.get("is_single_leg", True)),
                 signal_summary=result["reason"],
                 icc_phase=result["icc_phase"],
                 icc_signal=result["icc_signal"],

@@ -103,6 +103,19 @@ def _nominal_value(data: dict) -> float:
     return contracts * premium * 100
 
 
+def _is_single_leg(flow_item: dict) -> bool:
+    tags = str(flow_item.get("tags", "")).lower()
+    trade_type = str(flow_item.get("trade_type", "")).lower()
+    multi_leg_keywords = [
+        "spread", "condor", "butterfly", "collar", "ratio",
+        "strangle", "straddle", "roll", "multi", "complex"
+    ]
+    for keyword in multi_leg_keywords:
+        if keyword in tags or keyword in trade_type:
+            return False
+    return True
+
+
 def _attach_repeated_flow(rows: list[dict]) -> list[dict]:
     groups: dict[str, list[dict]] = {}
     for row in rows:
@@ -116,6 +129,7 @@ def _attach_repeated_flow(rows: list[dict]) -> list[dict]:
         enriched["accumulated_nominal"] = accumulated
         enriched["flow_count"] = len(group)
         enriched["repeated_flow"] = len(group) >= 3
+        enriched["is_single_leg"] = all(_is_single_leg(item) for item in group)
         enriched_rows.append(enriched)
     return enriched_rows
 
@@ -323,6 +337,7 @@ def _score_backtest(data: dict, dark_pool: DarkPoolSignal | None, oi_data: dict,
         executed_ask=executed_ask,
         nominal_value=nominal_value,
         is_sweep=is_sweep,
+        has_floor=is_floor,
         is_golden_sweep=(is_sweep or is_floor) and nominal_value >= 10_000_000,
         delta=delta if delta > 0 else 0.5,
         iv_rank=iv_rank,
@@ -331,6 +346,7 @@ def _score_backtest(data: dict, dark_pool: DarkPoolSignal | None, oi_data: dict,
         repeated_flow=_bool(data.get("repeated_flow")),
         flow_count=_int(data.get("flow_count")),
         accumulated_nominal=accumulated_nominal,
+        is_single_leg=_bool(data.get("is_single_leg", True)),
     )
     macro = MacroContext(market_session="BACKTEST", vix_level=15.0)
 
@@ -459,6 +475,7 @@ async def main():
                 repeated_flow=options.repeated_flow,
                 flow_count=options.flow_count,
                 accumulated_nominal=options.accumulated_nominal,
+                is_single_leg=options.is_single_leg,
                 dp_print_price=dark_pool.print_price if dark_pool else None,
                 dp_print_size=dark_pool.print_size if dark_pool else None,
                 dp_above_vwap=dark_pool.above_vwap if dark_pool else None,

@@ -65,6 +65,7 @@ class Alert(Base):
     repeated_flow   = Column(Boolean, default=False)
     flow_count      = Column(Integer, default=0)
     accumulated_nominal = Column(Float, default=0)
+    is_single_leg   = Column(Boolean, default=True)
 
     # Dark Pool
     dp_print_price  = Column(Float)

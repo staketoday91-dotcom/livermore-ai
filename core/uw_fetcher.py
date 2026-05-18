@@ -38,27 +38,52 @@ def _float(value, default: float = 0.0) -> float:
         return default
 
 
+def is_single_leg(flow_item: dict) -> bool:
+    """
+    Detecta si la transacción es single-leg (señal limpia) o multi-leg (señal ambigua).
+    Single-leg = una sola compra/venta direccional.
+    Multi-leg = spread, condor, collar, butterfly, ratio spread.
+    """
+    tags = str(flow_item.get("tags", "")).lower()
+    trade_type = str(flow_item.get("trade_type", "")).lower()
+    
+    multi_leg_keywords = [
+        "spread", "condor", "butterfly", "collar", "ratio", 
+        "strangle", "straddle", "roll", "multi", "complex"
+    ]
+    
+    for keyword in multi_leg_keywords:
+        if keyword in tags or keyword in trade_type:
+            return False
+    
+    # Si tiene has_floor o has_sweep = más probable single-leg con convicción
+    has_sweep = flow_item.get("has_sweep", False)
+    has_floor = flow_item.get("has_floor", False)
+    
+    return True  # default a single-leg si no hay indicadores de multi-leg
+
+
 def _with_nominal_value(alert: dict) -> dict:
     enriched = dict(alert)
     total_premium = _float(enriched.get("total_premium"))
     if total_premium > 0:
         enriched["nominal_value"] = total_premium
-        return enriched
-
-    contracts = _float(
-        enriched.get("contracts")
-        or enriched.get("volume")
-        or enriched.get("total_volume")
-        or enriched.get("size")
-        or enriched.get("quantity")
-    )
-    premium = _float(
-        enriched.get("premium")
-        or enriched.get("price")
-        or enriched.get("avg_price")
-        or enriched.get("last_price")
-    )
-    enriched["nominal_value"] = contracts * premium * 100
+    else:
+        contracts = _float(
+            enriched.get("contracts")
+            or enriched.get("volume")
+            or enriched.get("total_volume")
+            or enriched.get("size")
+            or enriched.get("quantity")
+        )
+        premium = _float(
+            enriched.get("premium")
+            or enriched.get("price")
+            or enriched.get("avg_price")
+            or enriched.get("last_price")
+        )
+        enriched["nominal_value"] = contracts * premium * 100
+    enriched["is_single_leg"] = is_single_leg(enriched)
     return enriched
 
 
@@ -84,6 +109,7 @@ def _group_repeated_flow(alerts: list[dict]) -> list[dict]:
         enriched["accumulated_nominal"] = accumulated
         enriched["flow_count"] = len(rows)
         enriched["repeated_flow"] = len(rows) >= 3
+        enriched["is_single_leg"] = all(bool(row.get("is_single_leg", True)) for row in rows)
         enriched["nominal_value"] = accumulated
         grouped.append(enriched)
 
