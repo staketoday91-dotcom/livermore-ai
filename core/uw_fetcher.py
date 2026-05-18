@@ -340,6 +340,65 @@ class UWFetcher:
             "put_strikes_with_oi": put_strikes_with_oi[:5]
         }
 
+    async def get_contract_price(self, contract_symbol: str) -> Optional[float]:
+        """
+        Obtiene el precio actual de un contrato de opción específico.
+        contract_symbol ejemplo: "QQQ260630P00680000"
+        """
+        import re
+
+        match = re.match(r'^([A-Z]+)(\d{6})([CP])(\d{8})$', contract_symbol or "")
+        if not match:
+            return None
+
+        ticker = match.group(1)
+
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(
+                f"{UW_BASE}/stock/{ticker}/option-contracts",
+                headers=_headers(),
+                params={"limit": 200}
+            )
+        if r.status_code != 200:
+            return None
+
+        data = r.json().get("data", [])
+
+        for contract in data:
+            symbol = contract.get("option_symbol", contract.get("symbol", ""))
+            if symbol == contract_symbol or str(symbol).replace(" ", "") == contract_symbol:
+                last_price = float(contract.get("last", contract.get("last_price", contract.get("ask", 0))) or 0)
+                return last_price if last_price > 0 else None
+
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(
+                f"{UW_BASE}/option-contract/{contract_symbol}/historic",
+                headers=_headers(),
+            )
+        if r.status_code != 200:
+            return None
+
+        payload = r.json()
+        historic = payload.get("chains", payload.get("data", payload if isinstance(payload, list) else []))
+        valid_rows = []
+        for row in historic:
+            last_price = _float(
+                row.get("last_price")
+                or row.get("last")
+                or row.get("close")
+                or row.get("avg_price")
+                or row.get("price")
+            )
+            if last_price > 0:
+                valid_rows.append((str(row.get("date", row.get("last_tape_time", ""))), last_price))
+
+        if not valid_rows:
+            return None
+
+        return max(valid_rows, key=lambda row: row[0])[1]
+
+        return None
+
     # ─── DARK POOL ───────────────────────────────────────────────────────────
 
     async def get_dark_pool(self, ticker: str) -> list[dict]:

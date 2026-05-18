@@ -16,7 +16,7 @@ load_dotenv(ROOT / ".env")
 
 from core.models import Alert, Base, engine, SessionLocal  # noqa: E402
 from core.scorer import DarkPoolSignal, LivermoreScorer, OptionsFlowSignal, MacroContext  # noqa: E402
-from core.uw_fetcher import classify_ticker  # noqa: E402
+from core.uw_fetcher import UWFetcher, classify_ticker  # noqa: E402
 
 UW_BASE = "https://api.unusualwhales.com/api"
 UW_TOKEN = os.getenv("UNUSUAL_WHALES_TOKEN", "")
@@ -249,7 +249,7 @@ def _price_from_historic(row: dict) -> float:
     return _float(_pick(row, "last_price", "close", "avg_price", "price", default=0))
 
 
-def _result_from_prices(data: dict, historic: list[dict]) -> tuple[str, float | None]:
+def _contract_entry_price(data: dict, historic: list[dict], nominal_value: float | None = None) -> float | None:
     entry_price = _float(_pick(data, "price", "avg_price", "last_price", default=0))
     alert_date = _alert_date(data)
 
@@ -259,12 +259,17 @@ def _result_from_prices(data: dict, historic: list[dict]) -> tuple[str, float | 
                 entry_price = _price_from_historic(row)
                 break
 
-    valid_rows = [row for row in historic if _price_from_historic(row) > 0]
-    if not entry_price or not valid_rows:
-        return "pending", None
+    if not entry_price and nominal_value:
+        contracts = _float(_pick(data, "contracts", "volume", "total_volume", "size", "quantity", default=0))
+        if contracts > 0:
+            entry_price = nominal_value / contracts / 100
 
-    latest = max(valid_rows, key=lambda row: str(_pick(row, "date", "last_tape_time", default="")))
-    current_price = _price_from_historic(latest)
+    return entry_price if entry_price > 0 else None
+
+
+def _result_from_option_prices(entry_price: float | None, current_price: float | None) -> tuple[str, float | None]:
+    if not entry_price or not current_price:
+        return "pending", None
     pnl_pct = round(((current_price - entry_price) / entry_price) * 100, 2)
 
     if pnl_pct > 20:
@@ -398,6 +403,36 @@ async def fetch_flow_alerts() -> list[dict]:
     return payload.get("data", payload if isinstance(payload, list) else [])
 
 
+async def recalculate_existing_option_pnl() -> dict[str, int]:
+    uw = UWFetcher()
+    db = SessionLocal()
+    counts = {"win": 0, "loss": 0, "pending": 0, "total": 0}
+    try:
+        alerts = db.query(Alert).filter(Alert.mode == "BACKTEST").all()
+        counts["total"] = len(alerts)
+        for alert in alerts:
+            current_price = await uw.get_contract_price(alert.contract or "")
+            entry_price = alert.premium
+            if not entry_price or entry_price <= 0 or entry_price > 1_000:
+                nominal = alert.accumulated_nominal or 0
+                contracts = alert.volume or alert.flow_count or 0
+                if nominal > 0 and contracts > 0:
+                    entry_price = nominal / contracts / 100
+
+            status, pnl_pct = _result_from_option_prices(entry_price, current_price)
+            alert.current_price = current_price
+            alert.premium = entry_price
+            alert.pnl_pct = pnl_pct
+            alert.status = status
+            alert.updated_at = datetime.utcnow()
+            counts[status] += 1
+
+        db.commit()
+        return counts
+    finally:
+        db.close()
+
+
 async def main():
     if not UW_TOKEN:
         raise RuntimeError("UNUSUAL_WHALES_TOKEN no configurado")
@@ -408,6 +443,7 @@ async def main():
     max_score = 0
     dark_pool_cache: dict[str, list[dict]] = {}
     historic_cache: dict[str, list[dict]] = {}
+    contract_price_cache: dict[str, float | None] = {}
     oi_cache: dict[str, dict] = {}
     chain_cache: dict[str, dict] = {}
 
@@ -423,6 +459,8 @@ async def main():
             contract = _contract(row)
             if contract and contract not in historic_cache:
                 historic_cache[contract] = await fetch_option_historic(client, contract)
+            if contract and contract not in contract_price_cache:
+                contract_price_cache[contract] = await UWFetcher().get_contract_price(contract)
 
     db = SessionLocal()
     try:
@@ -445,7 +483,9 @@ async def main():
             oi_data = oi_cache.get(ticker, {"oi_growing": False, "oi_change_pct": 0, "days_growing": 0})
             chain_map = chain_cache.get(ticker, {})
             score, nominal_value, direction, options = _score_backtest(row, dark_pool, oi_data, chain_map, category)
-            result_status, pnl_pct = _result_from_prices(row, historic_cache.get(options.contract, []))
+            entry_contract_price = _contract_entry_price(row, historic_cache.get(options.contract, []), nominal_value)
+            current_contract_price = contract_price_cache.get(options.contract)
+            result_status, pnl_pct = _result_from_option_prices(entry_contract_price, current_contract_price)
             max_score = max(max_score, score.total)
             alert = Alert(
                 ticker=ticker,
@@ -460,6 +500,7 @@ async def main():
                 score_regime=score.macro_bonus,
                 score_macro=score.macro_bonus,
                 entry_price=score.entry or None,
+                current_price=current_contract_price,
                 stop_loss=score.stop_loss or None,
                 target1=score.target1 or None,
                 target2=score.target2 or None,
@@ -467,7 +508,7 @@ async def main():
                 strike=_float(_pick(row, "strike", "strike_price", default=0)) or None,
                 expiration=_pick(row, "expiration", "expiry", "expiry_date", "expiration_date", default=None),
                 delta=options.delta,
-                premium=nominal_value,
+                premium=entry_contract_price,
                 volume=options.volume,
                 open_interest=options.open_interest,
                 vol_oi_ratio=options.vol_oi_ratio,
@@ -511,6 +552,8 @@ async def main():
     print(f"Score maximo: {max_score}")
     print(f"WIN: {wins}")
     print(f"LOSS: {losses}")
+    pending = loaded - wins - losses
+    print(f"PENDING: {pending}")
 
 
 async def run_backfill():

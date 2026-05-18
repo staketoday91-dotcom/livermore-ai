@@ -21,6 +21,9 @@ from core.models import Alert, WatchlistItem, Base, engine, SessionLocal, get_db
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("livermore")
 
+is_scanning = False
+last_scan_started_at: Optional[datetime] = None
+
 
 async def _seed_watchlist_if_empty():
     db = None
@@ -93,6 +96,7 @@ def _ensure_schema():
             "flow_count": "INTEGER DEFAULT 0",
             "accumulated_nominal": "FLOAT DEFAULT 0",
             "is_single_leg": "BOOLEAN DEFAULT TRUE",
+            "premium": "FLOAT",
         }
         with engine.connect() as conn:
             for col, col_type in missing_columns.items():
@@ -971,6 +975,11 @@ async def professional_dashboard():
             border:1px solid var(--line); border-radius:999px; background:rgba(201,168,76,.08); color:var(--gold);
             cursor:pointer; font-size:12px; font-weight:800; letter-spacing:.1em; padding:10px 13px; text-decoration:none; text-transform:uppercase;
         }
+        .scan-btn {
+            border:1px solid rgba(201,168,76,.55); border-radius:999px; background:linear-gradient(135deg,rgba(201,168,76,.22),rgba(232,146,26,.12));
+            color:var(--gold); cursor:pointer; font-size:12px; font-weight:800; letter-spacing:.1em; padding:10px 13px; text-transform:uppercase;
+        }
+        .scan-btn:disabled { cursor:not-allowed; opacity:.62; }
         .status {
             display:flex; align-items:center; gap:9px; padding:10px 14px; border:1px solid rgba(39,209,127,.28);
             border-radius:999px; background:rgba(39,209,127,.09); color:var(--green); font-size:12px; font-weight:800; text-transform:uppercase;
@@ -1096,6 +1105,7 @@ async def professional_dashboard():
                 <a class="nav-btn" href="/watchlist">WATCHLIST</a>
             </nav>
             <div class="header-actions">
+                <button class="scan-btn" id="manualScanBtn" type="button">⚡ SCAN AHORA</button>
                 <button class="theme-toggle" id="themeToggle" type="button">Modo día</button>
                 <div class="status"><span class="pulse"></span> Sistema LIVE</div>
             </div>
@@ -1129,7 +1139,7 @@ async def professional_dashboard():
 
         <footer>
             <span><strong>LIVERMORE AI TRADING TERMINAL</strong></span>
-            <span>Último scan: <strong id="lastScan">--</strong> · Hora ET: <strong id="etClock">--:--:--</strong></span>
+            <span>ÚLTIMO SCAN: <strong id="lastScan">--</strong> · Hora ET: <strong id="etClock">--:--:--</strong></span>
         </footer>
     </div>
 
@@ -1138,7 +1148,7 @@ async def professional_dashboard():
             alerts: document.getElementById("alerts"), alertFilter: document.getElementById("alertFilter"),
             clearFilter: document.getElementById("clearFilter"), filterTicker: document.getElementById("filterTicker"),
             marketContext: document.getElementById("marketContext"), rollovers: document.getElementById("rollovers"), stats: document.getElementById("stats"),
-            themeToggle: document.getElementById("themeToggle"), todayCount: document.getElementById("todayCount"),
+            themeToggle: document.getElementById("themeToggle"), manualScanBtn: document.getElementById("manualScanBtn"), todayCount: document.getElementById("todayCount"),
             watchlist: document.getElementById("watchlist"), watchCount: document.getElementById("watchCount"),
             lastUpdate: document.getElementById("lastUpdate"), lastScan: document.getElementById("lastScan"), etClock: document.getElementById("etClock")
         };
@@ -1260,6 +1270,23 @@ async def professional_dashboard():
                 els.rollovers.innerHTML = `<div class="market-card"><div class="stat-label">Rollovers Activos</div><div class="context-row"><span>Error</span><strong>${escapeHtml(error.message)}</strong></div></div>`;
             }
         }
+        async function triggerManualScan(button) {
+            if (!button || button.disabled) return;
+            const original = button.textContent;
+            button.disabled = true;
+            button.textContent = "⏳ Escaneando...";
+            try {
+                const result = await fetch("/api/scan/manual", { method:"POST", cache:"no-store" }).then((r) => r.json());
+                if (result.status === "already_running") button.textContent = "Ya corriendo...";
+            } catch (error) {
+                button.textContent = "Error scan";
+            }
+            setTimeout(() => {
+                button.disabled = false;
+                button.textContent = original;
+                refreshDashboard();
+            }, 15000);
+        }
         function renderWatchlist(items) {
             const scores = new Map(), phases = new Map();
             latestAlerts.forEach((a) => { const t = String(a.ticker || "").toUpperCase(); if (t && !scores.has(t)) scores.set(t, scoreValue(a.score)); if (t && !phases.has(t)) phases.set(t, phaseLabel(a.icc_phase)); });
@@ -1278,6 +1305,7 @@ async def professional_dashboard():
         }
         function filterTicker(ticker) { currentFilter = ticker; renderAlerts(); renderWatchlist(latestWatchlist); }
         els.clearFilter.addEventListener("click", () => { currentFilter = null; renderAlerts(); renderWatchlist(latestWatchlist); });
+        els.manualScanBtn.addEventListener("click", () => triggerManualScan(els.manualScanBtn));
         document.querySelectorAll(".cat-btn").forEach((btn) => btn.addEventListener("click", () => {
             categoryFilter = btn.dataset.category || "ALL";
             document.querySelectorAll(".cat-btn").forEach((item) => item.classList.toggle("active", item === btn));
@@ -1371,12 +1399,14 @@ async def backtesting_page(db: Session = Depends(get_db)):
                 <a class="ibkr-contract" data-raw="{escape(a.contract or '', quote=True)}" data-ticker="{escape(a.ticker or '', quote=True)}" href="#" target="_blank" rel="noopener">{escape(a.contract or "--")}</a>
                 <button class="copy-btn" data-contract="" onclick="copyIBKR(this)" title="Copiar contrato IBKR">📋</button>
             </td>
-            <td>${round((a.premium or 0) / 1_000_000, 1)}M</td>
+            <td>${round((a.accumulated_nominal or 0) / 1_000_000, 1)}M</td>
             <td>{escape(_format_oi_trend(a))}</td>
             <td>{'SI' if a.has_ladder else '--'}</td>
             <td>{'SI' if a.repeated_flow else '--'}{f' x{a.flow_count}' if a.repeated_flow and a.flow_count else ''}</td>
             <td>{a.score_total or 0}/100</td>
             <td>{escape(a.icc_phase or "--")}</td>
+            <td>${round(a.premium, 2) if a.premium is not None else '--'} por contrato</td>
+            <td>${round(a.current_price, 2) if a.current_price is not None else '--'} por contrato</td>
             <td class="pnl {'win' if (a.pnl_pct or 0) > 0 else 'loss' if (a.pnl_pct or 0) < 0 else ''}">{'+' if (a.pnl_pct or 0) > 0 else ''}{round(a.pnl_pct, 2) if a.pnl_pct is not None else '--'}{'%' if a.pnl_pct is not None else ''}</td>
             <td><span class="badge {escape(a.status or 'pending')}">{escape((a.status or 'pending').upper())}</span></td>
         </tr>
@@ -1414,6 +1444,8 @@ async def backtesting_page(db: Session = Depends(get_db)):
         }
         h1 { margin:0; color:var(--blue); font-size:clamp(28px,3vw,40px); font-weight:800; }
         .back { color:var(--gold); text-decoration:none; font-weight:800; border:1px solid rgba(201,168,76,.28); border-radius:999px; padding:10px 14px; background:rgba(201,168,76,.1); }
+        .scan-btn { color:var(--gold); border:1px solid rgba(201,168,76,.5); border-radius:999px; padding:10px 14px; background:linear-gradient(135deg,rgba(201,168,76,.22),rgba(232,146,26,.12)); cursor:pointer; font-weight:800; }
+        .scan-btn:disabled { cursor:not-allowed; opacity:.62; }
         .stats { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; margin:18px 0; }
         .stat { border:1px solid var(--line); border-radius:16px; padding:16px; background:rgba(15,23,42,.88); }
         .label { color:var(--muted); font-size:12px; font-weight:800; text-transform:uppercase; letter-spacing:.12em; }
@@ -1458,10 +1490,10 @@ async def backtesting_page(db: Session = Depends(get_db)):
         <table>
             <thead>
                 <tr>
-                    <th>Fecha Entrada</th><th>Ticker</th><th>Categoría</th><th>Tipo</th><th>Delta</th><th>Contrato</th><th>Nominal</th><th>OI Trend</th><th>Escalera</th><th>Flujo Repetido</th><th>Score</th><th>Dirección</th><th>P&L%</th><th>Status</th>
+                    <th>Fecha Entrada</th><th>Ticker</th><th>Categoría</th><th>Tipo</th><th>Delta</th><th>Contrato</th><th>Nominal</th><th>OI Trend</th><th>Escalera</th><th>Flujo Repetido</th><th>Score</th><th>Dirección</th><th>Entrada</th><th>Actual</th><th>P&L</th><th>Status</th>
                 </tr>
             </thead>
-            <tbody>""" + (rows or '<tr><td colspan="14">No hay backtests cargados.</td></tr>') + """</tbody>
+            <tbody>""" + (rows or '<tr><td colspan="16">No hay backtests cargados.</td></tr>') + """</tbody>
         </table>
     </section>
     <script>
@@ -1518,7 +1550,8 @@ def _serialize_alert(a: Alert) -> dict:
         "expiration":a.expiration,
         "delta":     a.delta,
         "premium":   a.premium,
-        "nominal_value": a.premium,
+        "current_contract_price": a.current_price,
+        "nominal_value": a.accumulated_nominal if (a.accumulated_nominal or 0) > 0 else a.premium,
         "oi_growing": bool(a.oi_growing),
         "oi_change_pct": a.oi_change_pct or 0,
         "oi_days_growing": a.oi_days_growing or 0,
@@ -1545,6 +1578,7 @@ def _serialize_alert(a: Alert) -> dict:
         "status":    a.status,
         "mode":      a.mode,
         "pnl":       a.pnl_pct,
+        "pnl_pct":   a.pnl_pct,
         "score_breakdown": {
             "icc":       a.score_icc,
             "dark_pool": a.score_darkpool,
@@ -1574,6 +1608,8 @@ async def alerts_page():
         header { display:flex; justify-content:space-between; align-items:center; gap:16px; border:1px solid var(--line); border-radius:18px; padding:18px 22px; background:linear-gradient(135deg,rgba(17,17,17,.98),rgba(10,10,10,.96)); box-shadow:0 24px 80px rgba(0,0,0,.45); }
         h1 { margin:0; color:var(--gold); font-size:clamp(28px,3vw,40px); font-weight:800; }
         .back { color:var(--gold); text-decoration:none; font-weight:800; border:1px solid rgba(201,168,76,.28); border-radius:999px; padding:10px 14px; background:rgba(201,168,76,.1); }
+        .scan-btn { color:var(--gold); border:1px solid rgba(201,168,76,.5); border-radius:999px; padding:10px 14px; background:linear-gradient(135deg,rgba(201,168,76,.22),rgba(232,146,26,.12)); cursor:pointer; font-weight:800; }
+        .scan-btn:disabled { cursor:not-allowed; opacity:.62; }
         .panel { margin-top:18px; border:1px solid var(--line); border-radius:18px; overflow:hidden; background:rgba(17,17,17,.96); }
         .panel-head { padding:16px 18px; color:var(--gold); background:rgba(201,168,76,.08); border-bottom:1px solid var(--line); font-weight:800; text-transform:uppercase; letter-spacing:.12em; }
         table { width:100%; border-collapse:collapse; }
@@ -1594,7 +1630,10 @@ async def alerts_page():
             <h1>LIVERMORE AI — ALERTAS</h1>
             <div style="color:var(--muted);font-size:13px;text-transform:uppercase;letter-spacing:.16em">Alertas activas en tiempo real</div>
         </div>
-        <a class="back" href="/">← Dashboard</a>
+        <div style="display:flex;gap:10px;flex-wrap:wrap">
+            <button class="scan-btn" id="manualScanBtn" type="button">⚡ SCAN AHORA</button>
+            <a class="back" href="/">← Dashboard</a>
+        </div>
     </header>
     <section class="panel">
         <div class="panel-head">Feed activo — auto-refresh 30s</div>
@@ -1710,7 +1749,10 @@ async def watchlist_page():
             <h1>LIVERMORE AI — WATCHLIST</h1>
             <div style="color:var(--muted);font-size:13px;text-transform:uppercase;letter-spacing:.16em">Tickers activos que monitorea el scanner</div>
         </div>
-        <a class="back" href="/">← Dashboard</a>
+        <div style="display:flex;gap:10px;flex-wrap:wrap">
+            <button class="scan-btn" id="manualScanBtn" type="button">⚡ SCAN AHORA</button>
+            <a class="back" href="/">← Dashboard</a>
+        </div>
     </header>
     <section class="panel">
         <div class="panel-head">Gestión de watchlist</div>
@@ -1747,6 +1789,24 @@ async def watchlist_page():
             await fetch(`/api/watchlist/${id}`, { method:"DELETE" });
             loadWatchlist();
         }
+        async function triggerManualScan(button) {
+            if (!button || button.disabled) return;
+            const original = button.textContent;
+            button.disabled = true;
+            button.textContent = "⏳ Escaneando...";
+            try {
+                const result = await fetch("/api/scan/manual", { method:"POST", cache:"no-store" }).then((r) => r.json());
+                if (result.status === "already_running") button.textContent = "Ya corriendo...";
+            } catch (error) {
+                button.textContent = "Error scan";
+            }
+            setTimeout(() => {
+                button.disabled = false;
+                button.textContent = original;
+                loadWatchlist();
+            }, 15000);
+        }
+        document.getElementById("manualScanBtn").addEventListener("click", (event) => triggerManualScan(event.currentTarget));
         document.getElementById("addForm").addEventListener("submit", async (event) => {
             event.preventDefault();
             const ticker = document.getElementById("tickerInput").value.trim().toUpperCase();
@@ -1778,6 +1838,9 @@ async def get_stats(db: Session = Depends(get_db)):
         today_count = len(today_alerts)
         score_values = [a.score_total for a in today_alerts if a.score_total is not None]
         latest = active.order_by(Alert.created_at.desc()).first()
+        latest_scan = last_scan_started_at
+        if latest and latest.created_at and (latest_scan is None or latest.created_at > latest_scan):
+            latest_scan = latest.created_at
         return {
             "total":    total,
             "today":    today_count,
@@ -1786,7 +1849,7 @@ async def get_stats(db: Session = Depends(get_db)):
             "open":     active.filter(Alert.status == "pending").count(),
             "win_rate": round(wins / closed * 100, 1) if closed > 0 else 0,
             "avg_score_today": round(sum(score_values) / len(score_values), 1) if score_values else 0,
-            "last_scan": latest.created_at.isoformat() if latest and latest.created_at else None,
+            "last_scan": latest_scan.isoformat() if latest_scan else None,
         }
     except Exception as e:
         logger.exception("get_stats error")
@@ -1860,6 +1923,29 @@ async def get_rollovers():
     except Exception as e:
         logger.exception("get_rollovers error")
         raise HTTPException(500, f"rollovers_error: {type(e).__name__}: {e}")
+
+
+async def _run_manual_scan():
+    global is_scanning
+    try:
+        from core.scanner import LivermoreScanner
+        scanner = LivermoreScanner(discord_bot=None)
+        await scanner.run_scan()
+    except Exception as e:
+        logger.exception(f"manual_scan error: {e}")
+    finally:
+        is_scanning = False
+
+
+@app.post("/api/scan/manual")
+async def manual_scan():
+    global is_scanning, last_scan_started_at
+    if is_scanning:
+        return {"status": "already_running"}
+    is_scanning = True
+    last_scan_started_at = datetime.utcnow()
+    asyncio.create_task(_run_manual_scan())
+    return {"status": "scanning", "started_at": last_scan_started_at.isoformat()}
 
 
 @app.patch("/api/alerts/{alert_id}")
