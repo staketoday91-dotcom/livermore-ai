@@ -10,6 +10,7 @@ from typing import Optional
 from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
+from pydantic import BaseModel, Field
 from sqlalchemy import inspect, text
 from sqlalchemy.orm import Session
 from dotenv import load_dotenv
@@ -207,8 +208,31 @@ async def lifespan(app: FastAPI):
             logger.info("Scanner scheduler iniciado desde web")
         except Exception as e:
             logger.warning(f"Scanner no disponible: {e}")
+    elif os.getenv("ENABLE_LIVERMORE_SCANNER", "false").lower() in {"1", "true", "yes"}:
+        try:
+            from core.scanner import LivermoreScanner
+            from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+            scanner = LivermoreScanner(discord_bot=None)
+            scheduler = AsyncIOScheduler(timezone="America/New_York")
+            scheduler.add_job(
+                scanner.run_scan,
+                "cron",
+                day_of_week="mon-fri",
+                hour="8-19",
+                minute="*/5",
+                id="livermore_scanner_web",
+                max_instances=1,
+                coalesce=True,
+            )
+            scheduler.start()
+            logger.info("ENABLE_LIVERMORE_SCANNER: scanner cada 5min (sin Discord)")
+        except Exception as e:
+            logger.warning(f"Scanner scheduler no disponible: {e}")
     else:
-        logger.info("Web/API iniciado sin Discord ni scheduler. Worker oficial: python worker.py")
+        logger.info(
+            "Web/API sin scheduler. Produccion: worker.py o ENABLE_LIVERMORE_SCANNER=true en Render"
+        )
 
     yield
 
@@ -222,6 +246,89 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 @app.get("/health")
 async def health():
     return {"status": "ok", "time": datetime.utcnow().isoformat()}
+
+
+class ChatRequest(BaseModel):
+    message: str = Field(..., min_length=1, max_length=2000)
+
+
+@app.post("/api/chat")
+async def livermore_chat(body: ChatRequest, db: Session = Depends(get_db)):
+    """Asistente Livermore: UW API + Postgres, misma doctrina que Aetheris."""
+    try:
+        from core.livermore_advisor import LivermoreAdvisor
+
+        advisor = LivermoreAdvisor(db)
+        reply = await advisor.reply(body.message)
+        return {"reply": reply}
+    except Exception as e:
+        logger.exception("livermore_chat error")
+        raise HTTPException(500, f"chat_error: {type(e).__name__}: {e}")
+
+
+@app.get("/advisor", response_class=HTMLResponse)
+async def advisor_page():
+    return """
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Livermore Advisor</title>
+  <style>
+    body { margin:0; font-family:Inter,system-ui,sans-serif; background:#0a0a0a; color:#f2f2f2; }
+    .wrap { max-width:720px; margin:0 auto; padding:20px; }
+    h1 { color:#c9a84c; font-size:1.4rem; }
+    .sub { color:#9a9a9a; font-size:.85rem; margin-bottom:16px; }
+    .log { border:1px solid rgba(201,168,76,.3); border-radius:12px; padding:12px; min-height:320px;
+           max-height:55vh; overflow:auto; background:#111; white-space:pre-wrap; }
+    .row { display:flex; gap:8px; margin-top:12px; }
+    input { flex:1; padding:12px; border-radius:10px; border:1px solid #333; background:#1a1a1a; color:#fff; }
+    button, a.back { padding:12px 16px; border-radius:10px; border:1px solid rgba(201,168,76,.5);
+      background:rgba(201,168,76,.15); color:#c9a84c; cursor:pointer; text-decoration:none; font-weight:700; }
+    .msg { margin:8px 0; } .user { color:#c9a84c; } .bot { color:#e5e5e5; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <a class="back" href="/">← Terminal</a>
+    <h1>Livermore Advisor</h1>
+    <p class="sub">Misma doctrina que Aetheris (Antigravity local). Datos vía API Unusual Whales — no es el chat de su web.</p>
+    <div id="log" class="log"></div>
+    <div class="row">
+      <input id="q" placeholder="Ej: NVDA, alertas, macro, reglas" />
+      <button id="send" type="button">Enviar</button>
+    </div>
+  </div>
+  <script>
+    const log = document.getElementById("log");
+    function add(role, text) {
+      const d = document.createElement("motion");
+      d.className = "msg " + role;
+      d.textContent = (role === "user" ? "Tú: " : "Advisor: ") + text;
+      log.appendChild(d);
+      log.scrollTop = log.scrollHeight;
+    }
+    add("bot", "Pregunta por ticker, alertas, macro o escribe reglas.");
+    async function send() {
+      const input = document.getElementById("q");
+      const msg = input.value.trim();
+      if (!msg) return;
+      add("user", msg);
+      input.value = "";
+      try {
+        const r = await fetch("/api/chat", { method:"POST", headers:{"Content-Type":"application/json"},
+          body: JSON.stringify({ message: msg }) });
+        const data = await r.json();
+        add("bot", data.reply || data.detail || "Sin respuesta");
+      } catch (e) { add("bot", "Error: " + e.message); }
+    }
+    document.getElementById("send").onclick = send;
+    document.getElementById("q").addEventListener("keydown", (e) => { if (e.key === "Enter") send(); });
+  </script>
+</body>
+</html>
+"""
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -705,6 +812,7 @@ async def dashboard():
                 <a class="nav-btn" href="/backtesting" target="_blank">📊 BACKTESTING</a>
                 <a class="nav-btn" href="/alerts">🔔 ALERTAS</a>
                 <a class="nav-btn" href="/watchlist">👁 WATCHLIST</a>
+                <a class="nav-btn" href="/advisor">💬 ADVISOR</a>
                 <div class="status"><span class="pulse"></span> Sistema LIVE</div>
             </div>
         </header>
@@ -1148,6 +1256,7 @@ async def professional_dashboard():
                 <a class="nav-btn" href="/backtesting">BACKTESTING</a>
                 <a class="nav-btn" href="/alerts">ALERTAS</a>
                 <a class="nav-btn" href="/watchlist">WATCHLIST</a>
+                <a class="nav-btn" href="/advisor">ADVISOR</a>
             </nav>
             <div class="header-actions">
                 <button class="scan-btn" id="manualScanBtn" type="button">⚡ SCAN AHORA</button>

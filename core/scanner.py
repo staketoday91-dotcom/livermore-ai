@@ -12,6 +12,7 @@ from typing import Optional
 import pytz
 
 from core.icc_engine import ICCDetector, RegimeDetector, ICCPhase, ICCDirection
+from core.institutional_rules import TIER_ALERT
 from core.scorer import LivermoreScorer, DarkPoolSignal, OptionsFlowSignal, MacroContext
 from core.uw_fetcher import UWFetcher, classify_ticker, normalize_occ_contract
 from core.models import Alert, WatchlistItem, SessionLocal
@@ -160,11 +161,11 @@ class LivermoreScanner:
         results.sort(key=lambda x: x["score"], reverse=True)
 
         for result in results:
-            if result["score"] >= 75:
+            if result["score"] >= TIER_ALERT:
                 await self._fire_alert(result)
 
         logger.info(f"Scan completo — {len(results)} analizados, "
-                    f"{sum(1 for r in results if r['score'] >= 75)} alertas")
+                    f"{sum(1 for r in results if r['score'] >= TIER_ALERT)} alertas")
 
     async def _analyze_ticker(self, ticker: str, session: str,
                                market_tide: Optional[dict],

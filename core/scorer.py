@@ -7,6 +7,14 @@ from typing import Optional
 from datetime import datetime, time
 import pytz
 
+from core.institutional_rules import (
+    TIER_ALERT,
+    TIER_LIVERMORE,
+    TIER_PREMIUM,
+    flow_score_for_nominal,
+    min_nominal_for_category,
+)
+
 
 @dataclass
 class DarkPoolSignal:
@@ -91,24 +99,13 @@ class LivermoreScorer:
 
     NY_TZ = pytz.timezone("America/New_York")
 
-    FLOW_THRESHOLDS = {
-        "STOCK": ((500_000, 1_000_000, 5), (1_000_000, 3_000_000, 10), (3_000_000, 10_000_000, 18), (10_000_000, float("inf"), 25)),
-        "ETF": ((1_000_000, 3_000_000, 5), (3_000_000, 5_000_000, 10), (5_000_000, 10_000_000, 18), (10_000_000, float("inf"), 25)),
-        "INDEX": ((3_000_000, 5_000_000, 5), (5_000_000, 10_000_000, 12), (10_000_000, 50_000_000, 20), (50_000_000, float("inf"), 25)),
-    }
-
     @classmethod
     def min_nominal_for_category(cls, category: str) -> float:
-        thresholds = cls.FLOW_THRESHOLDS.get((category or "STOCK").upper(), cls.FLOW_THRESHOLDS["STOCK"])
-        return thresholds[0][0]
+        return min_nominal_for_category(category)
 
     @classmethod
     def flow_score_for_nominal(cls, nominal: float, category: str) -> int:
-        thresholds = cls.FLOW_THRESHOLDS.get((category or "STOCK").upper(), cls.FLOW_THRESHOLDS["STOCK"])
-        for low, high, score in thresholds:
-            if low <= nominal < high:
-                return score
-        return 0
+        return flow_score_for_nominal(nominal, category)
 
     @staticmethod
     def delta_modifier(delta: float) -> tuple[float, str]:
@@ -309,17 +306,17 @@ class LivermoreScorer:
         total = max(0, min(total, 100))
 
         # ─── DECISION ────────────────────────────────────────
-        should_alert = total >= 75
+        should_alert = total >= TIER_ALERT
         alert_channels = []
         tier = "NONE"
 
-        if total >= 95:
+        if total >= TIER_LIVERMORE:
             tier = "LIVERMORE"
             alert_channels = [1, 2, 3]  # All tiers
-        elif total >= 85:
+        elif total >= TIER_PREMIUM:
             tier = "PREMIUM"
             alert_channels = [1, 2]
-        elif total >= 75:
+        elif total >= TIER_ALERT:
             tier = "ALERT"
             alert_channels = [1]
 
