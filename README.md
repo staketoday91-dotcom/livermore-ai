@@ -2,6 +2,10 @@
 
 Terminal de tape reading basado en Unusual Whales como fuente unica.
 
+**Implementación y deploy:** Cursor en este repo (`livermore-ai-v2`).  
+**Cerebro del producto (decisiones):** [docs/LIVERMORE_BRAIN.md](docs/LIVERMORE_BRAIN.md)  
+**Cómo trabajar sin Claude como segundo coder:** [docs/CURSOR_WORKFLOW.md](docs/CURSOR_WORKFLOW.md)
+
 ## Arquitectura Oficial
 
 El proyecto corre en dos procesos separados:

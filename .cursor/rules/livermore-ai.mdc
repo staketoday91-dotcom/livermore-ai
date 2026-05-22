@@ -1,0 +1,44 @@
+---
+description: Livermore AI — Cursor es el único dueño de implementación en este repo
+globs:
+  - "**/*"
+alwaysApply: true
+---
+
+# Livermore AI — reglas del agente
+
+## Dueño del código
+
+- **Cursor implementa todo** en `livermore-ai-v2` / GitHub `staketoday91-dotcom/livermore-ai`.
+- No asumir instrucciones de otros chats como ya aplicadas: verificar `git log` y archivos.
+- Antes de diagnósticos grandes, leer `docs/LIVERMORE_BRAIN.md` y `PROJECT_CHECKPOINT.md`.
+
+## Producto en foco
+
+- **Livermore web/pago:** `main.py`, `core/*`, `bot/discord_bot.py`, producción Render.
+- **Antigravity/Streamlit/XAMPP** (`app.py`, `antigravity/`, `1_*.py`…): fuera de alcance salvo que el usuario lo pida explícitamente.
+
+## Fuente de datos
+
+- Unusual Whales vía `core/uw_fetcher.py` únicamente para Livermore.
+- No usar `core/fetcher.py` (Polygon/Tradier legacy) para diagnósticos UW.
+- Respetar whitelist en `antigravity/docs/UNUSUAL_WHALES_API_RULES.md` si se añaden endpoints.
+
+## Doctrina de implementación
+
+- Acumulación por **contrato** (OCC), no por ticker.
+- Commits completos: si se toca `scanner.py` con nuevos campos de flow, alinear `scorer.py` y modelos.
+- No commitear `.env`, tokens, ni `*.db` locales.
+- Producción: `core/runtime.py` bloquea local por defecto; cloud activa scanner con `ENABLE_LIVERMORE_SCANNER=true`.
+
+## Entregas
+
+- Cambios mínimos y probables (compilar/importar o curl a APIs cuando aplique).
+- Tras cambios relevantes: commit + push `main` solo si el usuario lo pide.
+- Actualizar `docs/LIVERMORE_BRAIN.md` cuando haya decisiones de producto nuevas.
+
+## Render
+
+- URL: https://livermore-ai.onrender.com
+- Recordar cold start en plan Free y límite 512MB (`MAX_SCAN_TICKERS`, delays).
+- Scanner 24/7: no reintroducir `return` temprano en `run_scan` que impida análisis fuera de RTH.

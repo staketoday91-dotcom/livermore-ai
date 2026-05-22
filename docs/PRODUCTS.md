@@ -1,5 +1,7 @@
 # Dos productos, una doctrina
 
+> Para Livermore de pago, Cursor es el único que commitea código. Ver [CURSOR_WORKFLOW.md](CURSOR_WORKFLOW.md).
+
 ## Livermore AI (web / pago)
 
 - Código: `main.py`, `core/*`, `worker.py`

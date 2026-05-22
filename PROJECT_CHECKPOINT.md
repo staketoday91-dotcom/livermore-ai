@@ -2,7 +2,10 @@
 
 **Dueño del producto (código + deploy):** Cursor — repo `livermore-ai-v2` / GitHub `staketoday91-dotcom/livermore-ai`.  
 **Producción:** https://livermore-ai.onrender.com  
-Antigravity/Streamlit es proyecto local aparte; no bloquea Livermore web.
+**Cerebro consolidado (ex-Claude):** [docs/LIVERMORE_BRAIN.md](docs/LIVERMORE_BRAIN.md)  
+**Flujo de trabajo:** [docs/CURSOR_WORKFLOW.md](docs/CURSOR_WORKFLOW.md)  
+
+Antigravity/Streamlit es laboratorio local aparte; no bloquea Livermore web.
 
 ## Objetivo
 
