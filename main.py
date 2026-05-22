@@ -4,7 +4,7 @@ import asyncio
 import re
 from html import escape
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, date, time, timedelta
 from typing import Optional
 
 from fastapi import FastAPI, Depends, HTTPException, Query
@@ -2052,6 +2052,7 @@ async def get_stats(db: Session = Depends(get_db)):
 async def get_alerts(
     status: Optional[str] = Query(None),
     tier:   Optional[str] = Query(None),
+    date:   Optional[str] = Query(None, description="YYYY-MM-DD (America/New_York)"),
     limit:  int           = Query(50),
     db: Session = Depends(get_db)
 ):
@@ -2062,6 +2063,17 @@ async def get_alerts(
             .filter(Alert.mode != "BACKTEST")
             .order_by(Alert.created_at.desc())
         )
+        if date:
+            try:
+                day = datetime.strptime(date.strip()[:10], "%Y-%m-%d").date()
+            except ValueError:
+                raise HTTPException(400, "date must be YYYY-MM-DD")
+            ny = pytz.timezone("America/New_York")
+            start_ny = ny.localize(datetime.combine(day, time.min))
+            end_ny = start_ny + timedelta(days=1)
+            start_utc = start_ny.astimezone(pytz.UTC).replace(tzinfo=None)
+            end_utc = end_ny.astimezone(pytz.UTC).replace(tzinfo=None)
+            q = q.filter(Alert.created_at >= start_utc, Alert.created_at < end_utc)
         if status:
             q = q.filter(Alert.status == status)
         if tier:

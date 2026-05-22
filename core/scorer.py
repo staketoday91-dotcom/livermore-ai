@@ -46,6 +46,9 @@ class OptionsFlowSignal:
     flow_count:     int = 0
     accumulated_nominal: float = 0
     is_single_leg:  bool = True
+    delta_nominal:  float = 0.0
+    accel_ratio:    float = 0.0
+    is_accelerating: bool = False
     score:          int = 0
 
 
@@ -248,6 +251,18 @@ class LivermoreScorer:
                 score_opt = min(25, round(score_opt * 1.15))
                 reasons.append("Single-leg confirmado — señal direccional limpia")
 
+            if opt.is_accelerating:
+                if opt.accel_ratio > 0.5:
+                    score_opt = min(25, round(score_opt * 1.6))
+                    reasons.append(
+                        f"🔥 Flujo ACELERANDO +${opt.delta_nominal / 1000:.0f}K este scan — carga en vivo"
+                    )
+                elif opt.delta_nominal >= 25_000:
+                    score_opt = min(25, round(score_opt * 1.3))
+                    reasons.append(
+                        f"Flujo creciendo +${opt.delta_nominal / 1000:.0f}K vs scan anterior"
+                    )
+
             contract = opt.contract
             score_opt = min(score_opt, 25)
 
@@ -304,6 +319,15 @@ class LivermoreScorer:
                 suffix = f": {events}" if events else ""
                 reasons.append(f"⚠️ EVENTO MACRO MAÑANA{suffix} — score reducido 15%")
         total = max(0, min(total, 100))
+
+        # LIVERMORE (95+) exige aceleración de flujo cuando hay señal de opciones.
+        if (
+            total >= TIER_LIVERMORE
+            and options_flow
+            and not options_flow.is_accelerating
+        ):
+            total = min(total, TIER_PREMIUM)
+            reasons.append("Sin aceleración de flujo — techo PREMIUM (LIVERMORE requiere carga en vivo)")
 
         # ─── DECISION ────────────────────────────────────────
         should_alert = total >= TIER_ALERT

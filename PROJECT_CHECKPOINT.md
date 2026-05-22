@@ -1,5 +1,9 @@
 # Livermore AI Checkpoint
 
+**Dueño del producto (código + deploy):** Cursor — repo `livermore-ai-v2` / GitHub `staketoday91-dotcom/livermore-ai`.  
+**Producción:** https://livermore-ai.onrender.com  
+Antigravity/Streamlit es proyecto local aparte; no bloquea Livermore web.
+
 ## Objetivo
 
 Construir un terminal de tape reading con Unusual Whales como fuente unica:

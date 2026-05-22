@@ -215,12 +215,14 @@ class LivermoreScanner:
         except Exception as e:
             logger.warning(f"hydrate_watchlist_prices en run_scan: {e}")
 
-        if not self.is_market_hours():
-            logger.info("Outside market hours — skipping scan (precios ya hidratados)")
-            return
-
+        closed = not self.is_market_hours()
         session = self.get_session()
-        logger.info(f"Scan iniciado — {session}")
+        if closed:
+            logger.info(
+                f"Scan fuera de RTH — analizando flujo acumulado de la sesión ({session})"
+            )
+        else:
+            logger.info(f"Scan iniciado — {session}")
 
         # Market tide: contexto global antes de escanear tickers
         market_tide = await self.uw.get_market_tide()
