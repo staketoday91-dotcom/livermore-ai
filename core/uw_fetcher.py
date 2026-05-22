@@ -807,3 +807,46 @@ class UWFetcher:
         except:
             pass
         return 99
+
+    async def get_stock_price(self, ticker: str) -> Optional[dict]:
+        """
+        Precio del subyacente vía GET /stock/{ticker}/ohlc/1d.
+        Endpoint validado: devuelve filas diarias ordenadas por recencia, cada
+        una con open/high/low/close/date. Funciona para cualquier ticker.
+        Devuelve {price, prev_close, change_pct} o None.
+        """
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                r = await client.get(
+                    f"{UW_BASE}/stock/{ticker}/ohlc/1d",
+                    headers=_headers(),
+                    params={"limit": 2},
+                )
+            if r.status_code != 200:
+                return None
+
+            payload = r.json()
+            rows = payload.get("data", payload if isinstance(payload, list) else [])
+            if not rows:
+                return None
+
+            # Fila más reciente = precio actual; segunda = cierre anterior
+            today = rows[0]
+            price = _float(today.get("close"))
+            if not price or price <= 0:
+                return None
+
+            prev_close = _float(rows[1].get("close")) if len(rows) > 1 else None
+
+            change_pct = 0.0
+            if prev_close and prev_close > 0:
+                change_pct = round(((price - prev_close) / prev_close) * 100, 2)
+
+            return {
+                "price": round(price, 2),
+                "prev_close": round(prev_close, 2) if prev_close else None,
+                "change_pct": change_pct,
+            }
+        except Exception as e:
+            logger.warning(f"get_stock_price({ticker}) error: {e}")
+            return None

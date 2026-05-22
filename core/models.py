@@ -130,6 +130,11 @@ class WatchlistItem(Base):
     notes       = Column(Text)
     active      = Column(Boolean, default=True)
     created_at  = Column(DateTime, default=datetime.utcnow)
+    # ─── Precio hidratado por el scanner (lee desde DB, no llama UW por request) ───
+    current_price    = Column(Float)
+    prev_close       = Column(Float)
+    day_change_pct   = Column(Float, default=0)
+    price_updated_at = Column(DateTime)
 
 
 # ─── MARKET STATS ────────────────────────────────────────
@@ -148,6 +153,24 @@ class MarketSnapshot(Base):
     regime      = Column(String(20))
     session     = Column(String(20))
     snapshot_at = Column(DateTime, default=datetime.utcnow)
+
+
+# ─── CONTRACT FLOW SNAPSHOT ──────────────────────────────
+# Memoria de flujo por contrato entre scans.
+# Permite calcular la DERIVADA: ¿el acumulado del contrato sigue creciendo?
+class ContractFlowSnapshot(Base):
+    __tablename__ = "contract_flow_snapshots"
+
+    id                  = Column(Integer, primary_key=True)
+    contract            = Column(String(40), nullable=False, index=True)  # OCC: TSLA260522C00420000
+    ticker              = Column(String(10), nullable=False, index=True)
+    accumulated_nominal = Column(Float, default=0)    # nivel total en este scan
+    flow_count          = Column(Integer, default=0)  # nº de hits acumulados
+    prev_accumulated    = Column(Float, default=0)    # acumulado del scan anterior
+    delta_nominal       = Column(Float, default=0)    # crecimiento vs scan anterior (la derivada)
+    accel_ratio         = Column(Float, default=0)    # delta / prev (0 = nuevo o plano)
+    is_accelerating     = Column(Boolean, default=False)
+    snapshot_at         = Column(DateTime, default=datetime.utcnow, index=True)
 
 
 # ─── SYSTEM LOG ──────────────────────────────────────────

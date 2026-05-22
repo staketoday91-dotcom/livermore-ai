@@ -27,50 +27,6 @@ is_scanning = False
 last_scan_started_at: Optional[datetime] = None
 _OCC_RE = re.compile(r"^([A-Z]+)\d{6}[CP]\d{8}$")
 
-_uw_cache: dict = {
-    "market_tide": None,
-    "macro": None,
-    "rollovers": None,
-    "screener_by_ticker": {},
-    "refreshed_at": None,
-}
-
-
-def _env_flag(name: str, default: str = "false") -> bool:
-    return os.getenv(name, default).lower() in {"1", "true", "yes"}
-
-
-async def _refresh_uw_cache() -> dict:
-    from core.uw_fetcher import UWFetcher
-
-    uw = UWFetcher()
-    tide = await uw.get_market_tide()
-    macro = await uw.get_macro_calendar()
-    rollovers = await uw.detect_rollover()
-    screener = await uw.get_screener(limit=50)
-    _uw_cache["market_tide"] = tide or {
-        "net_call_premium": 0,
-        "net_put_premium": 0,
-        "net_volume": 0,
-        "market_direction": "NEUTRAL",
-        "call_improving": False,
-        "bullish": False,
-    }
-    _uw_cache["macro"] = macro or {
-        "has_event_today": False,
-        "has_event_tomorrow": False,
-        "events_today": [],
-        "events_tomorrow": [],
-    }
-    _uw_cache["rollovers"] = rollovers or []
-    _uw_cache["screener_by_ticker"] = {
-        str(row.get("ticker", "")).upper(): row
-        for row in (screener or [])
-        if row.get("ticker")
-    }
-    _uw_cache["refreshed_at"] = datetime.utcnow().isoformat()
-    return {"ok": True, "refreshed_at": _uw_cache["refreshed_at"]}
-
 
 async def _seed_watchlist_if_empty():
     db = None
@@ -109,6 +65,19 @@ def _ensure_schema():
                     conn.execute(text("ALTER TABLE watchlist ADD COLUMN category VARCHAR(20) DEFAULT 'STOCK'"))
                     conn.commit()
                 logger.info("watchlist.category agregado para filtros por categoria")
+            # Columnas de precio hidratadas por el scanner
+            watch_price_cols = {
+                "current_price":    "FLOAT",
+                "prev_close":       "FLOAT",
+                "day_change_pct":   "FLOAT DEFAULT 0",
+                "price_updated_at": "TIMESTAMP",
+            }
+            for col, ddl in watch_price_cols.items():
+                if col not in watch_cols:
+                    with engine.connect() as conn:
+                        conn.execute(text(f"ALTER TABLE watchlist ADD COLUMN {col} {ddl}"))
+                        conn.commit()
+                    logger.info(f"watchlist.{col} agregado para hidratacion de precio")
 
         if not inspector.has_table("alerts"):
             return
@@ -207,8 +176,8 @@ async def lifespan(app: FastAPI):
             elif backtest_count == 0:
                 logger.info("Backfill automático desactivado; usar core/backfill.py manualmente si hace falta")
             
-            if watchlist_count == 0 and _env_flag("ENABLE_AUTO_WATCHLIST_SEED"):
-                logger.info("Watchlist vacía — seeding automático (ENABLE_AUTO_WATCHLIST_SEED)...")
+            if watchlist_count == 0:
+                logger.info("Watchlist vacía — seeding automático...")
                 async def _seed():
                     from core.uw_fetcher import UWFetcher, classify_ticker
                     uw = UWFetcher()
@@ -220,18 +189,17 @@ async def lifespan(app: FastAPI):
                     _db2.commit()
                     _db2.close()
                 asyncio.create_task(_seed())
-            elif watchlist_count == 0:
-                logger.info("Watchlist vacía — agrega tickers manualmente o activa ENABLE_AUTO_WATCHLIST_SEED")
         except Exception as e:
             logger.warning(f"Auto-init error: {e}")
         logger.info("Livermore AI started — DB ready")
     except Exception as e:
         logger.error(f"DB init fallo (app sigue arriba para servir /health): {e}")
 
-    from core.runtime import should_run_worker_in_web
-
-    if should_run_worker_in_web():
-        logger.info("Livermore en cloud: Discord activo en el proceso web (scanner solo manual).")
+    if os.getenv("RUN_WORKER_IN_WEB", "false").lower() in {"1", "true", "yes"}:
+        logger.warning(
+            "RUN_WORKER_IN_WEB activo: web arrancara Discord+scanner. "
+            "Usar solo en desarrollo; en produccion el proceso oficial es worker.py."
+        )
         discord_bot = None
         try:
             from bot.discord_bot import create_bot, run_bot
@@ -241,26 +209,19 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"Discord bot no disponible: {e}")
 
-        if _env_flag("ENABLE_AUTO_SCANNER"):
-            try:
-                from core.scanner import LivermoreScanner
-                from apscheduler.schedulers.asyncio import AsyncIOScheduler
-                scanner = LivermoreScanner(discord_bot=discord_bot)
-                scheduler = AsyncIOScheduler(timezone="America/New_York")
-                scheduler.add_job(
-                    scanner.run_scan,
-                    "cron",
-                    day_of_week="mon-fri",
-                    hour="8-19",
-                    minute="*/5",
-                )
-                scheduler.start()
-                logger.info("Scanner scheduler iniciado (ENABLE_AUTO_SCANNER=true)")
-            except Exception as e:
-                logger.warning(f"Scanner no disponible: {e}")
-        else:
-            logger.info("Scanner automático desactivado — usa SCAN AHORA o ENABLE_AUTO_SCANNER=true")
-    elif _env_flag("ENABLE_AUTO_SCANNER") and not should_run_worker_in_web():
+        try:
+            from core.scanner import LivermoreScanner
+            from apscheduler.schedulers.asyncio import AsyncIOScheduler
+            scanner   = LivermoreScanner(discord_bot=discord_bot)
+            scheduler = AsyncIOScheduler(timezone="America/New_York")
+            scheduler.add_job(scanner.run_scan, "cron",
+                              day_of_week="mon-fri",
+                              hour="8-19", minute="*/5")
+            scheduler.start()
+            logger.info("Scanner scheduler iniciado desde web")
+        except Exception as e:
+            logger.warning(f"Scanner no disponible: {e}")
+    elif os.getenv("ENABLE_LIVERMORE_SCANNER", "false").lower() in {"1", "true", "yes"}:
         try:
             from core.scanner import LivermoreScanner
             from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -283,8 +244,7 @@ async def lifespan(app: FastAPI):
             logger.warning(f"Scanner scheduler no disponible: {e}")
     else:
         logger.info(
-            "Web/API sin Discord ni scanner (modo local o flags desactivados). "
-            "Produccion: despliegue en Render/Railway."
+            "Web/API sin scheduler. Produccion: worker.py o ENABLE_LIVERMORE_SCANNER=true en Render"
         )
 
     yield
@@ -1312,7 +1272,6 @@ async def professional_dashboard():
                 <a class="nav-btn" href="/advisor">ADVISOR</a>
             </nav>
             <div class="header-actions">
-                <button class="scan-btn" id="refreshDataBtn" type="button">🔄 ACTUALIZAR</button>
                 <button class="scan-btn" id="manualScanBtn" type="button">⚡ SCAN AHORA</button>
                 <button class="theme-toggle" id="themeToggle" type="button">Modo día</button>
                 <div class="status"><span class="pulse"></span> Sistema LIVE</div>
@@ -1332,7 +1291,7 @@ async def professional_dashboard():
             </section>
 
             <section class="panel">
-                <div class="panel-head"><h2 class="panel-title">Feed de Alertas</h2><span class="panel-meta"><strong id="todayCount">0</strong> hoy · Pulsa Actualizar</span></div>
+                <div class="panel-head"><h2 class="panel-title">Feed de Alertas</h2><span class="panel-meta"><strong id="todayCount">0</strong> hoy · Auto-refresh 30s</span></div>
                 <div class="alerts">
                     <div class="alert-filter" id="alertFilter"><span>Filtrando por <strong id="filterTicker"></strong></span><button class="clear-filter" type="button" id="clearFilter">LIMPIAR</button></div>
                     <div id="alerts"></div>
@@ -1356,7 +1315,7 @@ async def professional_dashboard():
             alerts: document.getElementById("alerts"), alertFilter: document.getElementById("alertFilter"),
             clearFilter: document.getElementById("clearFilter"), filterTicker: document.getElementById("filterTicker"),
             marketContext: document.getElementById("marketContext"), macroCalendar: document.getElementById("macroCalendar"), rollovers: document.getElementById("rollovers"), stats: document.getElementById("stats"),
-            themeToggle: document.getElementById("themeToggle"), refreshDataBtn: document.getElementById("refreshDataBtn"), manualScanBtn: document.getElementById("manualScanBtn"), todayCount: document.getElementById("todayCount"),
+            themeToggle: document.getElementById("themeToggle"), manualScanBtn: document.getElementById("manualScanBtn"), todayCount: document.getElementById("todayCount"),
             watchlist: document.getElementById("watchlist"), watchCount: document.getElementById("watchCount"),
             lastUpdate: document.getElementById("lastUpdate"), lastScan: document.getElementById("lastScan"), etClock: document.getElementById("etClock")
         };
@@ -1452,10 +1411,6 @@ async def professional_dashboard():
             els.stats.innerHTML = cards.map(([label, value]) => `<div class="stat-card"><div class="stat-label">${label}</div><div class="stat-value">${escapeHtml(fmt(value,0))}</div></div>`).join("");
         }
         function renderMarketContext(tide, stats) {
-            if (tide?.stale) {
-                els.marketContext.innerHTML = `<div class="market-card"><div class="stat-label">Market Tide</div><div class="macro-message">${escapeHtml(tide.message || "Pulsa Actualizar para cargar datos UW.")}</div></div>`;
-                return;
-            }
             const direction = String(tide?.market_direction || "NEUTRAL").toUpperCase(), cls = direction === "BULLISH" ? "bullish" : direction === "BEARISH" ? "bearish" : "neutral";
             const arrow = direction === "BULLISH" ? "↑" : direction === "BEARISH" ? "↓" : "→";
             els.marketContext.innerHTML = `<div class="market-card"><div class="tide-head"><div><div class="stat-label">Market Tide</div><div class="tide-value ${cls}">${direction}</div></div><div class="tide-arrow ${cls}">${arrow}</div></div>
@@ -1476,10 +1431,6 @@ async def professional_dashboard():
             </div>`;
         }
         function renderMacroCalendar(macro) {
-            if (macro?.stale) {
-                els.macroCalendar.innerHTML = `<div class="market-card macro-card clean"><div class="stat-label">Calendario Macro</div><div class="macro-message">${escapeHtml(macro.message || "Pulsa Actualizar para cargar calendario macro.")}</div></div>`;
-                return;
-            }
             const today = Array.isArray(macro?.events_today) ? macro.events_today : [];
             const tomorrow = Array.isArray(macro?.events_tomorrow) ? macro.events_tomorrow : [];
             if (macro?.has_event_today) {
@@ -1490,28 +1441,19 @@ async def professional_dashboard():
                 els.macroCalendar.innerHTML = `<div class="market-card macro-card clean"><div class="stat-label">Calendario Macro</div><div class="macro-message">✅ Sin eventos macro próximos</div></div>`;
             }
         }
-        async function refreshUwCache() {
-            const response = await fetch("/api/data/refresh", { method: "POST", cache: "no-store" });
-            if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
-            return response.json();
-        }
-        async function triggerDataRefresh(button) {
-            if (!button || button.disabled) return;
-            const original = button.textContent;
-            button.disabled = true;
-            button.textContent = "⏳ Actualizando...";
+        async function refreshMacroCalendar() {
             try {
-                await refreshUwCache();
-                await refreshDashboard();
-                button.textContent = "✓ Listo";
+                renderMacroCalendar(await getJson("/api/macro"));
             } catch (error) {
-                button.textContent = "Error";
-                els.lastUpdate.textContent = `Error UW: ${error.message}`;
+                els.macroCalendar.innerHTML = `<div class="market-card"><div class="stat-label">Calendario Macro</div><div class="context-row"><span>Error</span><strong>${escapeHtml(error.message)}</strong></div></div>`;
             }
-            setTimeout(() => {
-                button.disabled = false;
-                button.textContent = original;
-            }, 1200);
+        }
+        async function refreshRollovers() {
+            try {
+                renderRollovers(await getJson("/api/rollovers"));
+            } catch (error) {
+                els.rollovers.innerHTML = `<div class="market-card"><div class="stat-label">Rollovers Activos</div><div class="context-row"><span>Error</span><strong>${escapeHtml(error.message)}</strong></div></div>`;
+            }
         }
         async function triggerManualScan(button) {
             if (!button || button.disabled) return;
@@ -1548,7 +1490,6 @@ async def professional_dashboard():
         }
         function filterTicker(ticker) { currentFilter = ticker; renderAlerts(); renderWatchlist(latestWatchlist); }
         els.clearFilter.addEventListener("click", () => { currentFilter = null; renderAlerts(); renderWatchlist(latestWatchlist); });
-        els.refreshDataBtn.addEventListener("click", () => triggerDataRefresh(els.refreshDataBtn));
         els.manualScanBtn.addEventListener("click", () => triggerManualScan(els.manualScanBtn));
         document.querySelectorAll(".cat-btn").forEach((btn) => btn.addEventListener("click", () => {
             categoryFilter = btn.dataset.category || "ALL";
@@ -1564,16 +1505,14 @@ async def professional_dashboard():
             try {
                 const [alerts, stats, watchlist, marketTide] = await Promise.all([getJson("/api/alerts?limit=200"), getJson("/api/stats"), getJson("/api/watchlist"), getJson("/api/market-tide")]);
                 latestAlerts = Array.isArray(alerts) ? alerts : []; latestWatchlist = Array.isArray(watchlist) ? watchlist : [];
-                renderAlerts(); renderStats(stats); renderMarketContext(marketTide, stats); renderWatchlist(latestWatchlist);
-                renderRollovers(await getJson("/api/rollovers"));
-                renderMacroCalendar(await getJson("/api/macro"));
+                renderAlerts(); renderStats(stats); renderMarketContext(marketTide, stats); renderWatchlist(latestWatchlist); refreshRollovers(); refreshMacroCalendar();
                 els.todayCount.textContent = stats.today ?? 0; lastScanDate = stats.last_scan ? new Date(stats.last_scan) : (latestAlerts[0]?.date ? new Date(latestAlerts[0].date) : null);
                 els.lastUpdate.textContent = "Actualizado"; updateLastScan();
             } catch (error) { els.alerts.innerHTML = `<div class="empty">Error cargando datos: ${escapeHtml(error.message)}</div>`; els.lastUpdate.textContent = "Error"; }
         }
         function updateClock() { els.etClock.textContent = new Intl.DateTimeFormat("es-US", { timeZone:"America/New_York", hour:"2-digit", minute:"2-digit", second:"2-digit", hour12:false }).format(new Date()); }
         function updateLastScan() { els.lastScan.textContent = lastScanDate ? minutesAgo(lastScanDate.toISOString()) : "--"; }
-        updateClock(); refreshDashboard(); setInterval(updateClock, 1000); setInterval(updateLastScan, 1000);
+        updateClock(); refreshDashboard(); setInterval(updateClock, 1000); setInterval(updateLastScan, 1000); setInterval(refreshDashboard, 30000); setInterval(refreshRollovers, 60000); setInterval(refreshMacroCalendar, 300000);
     </script>
 </body>
 </html>
@@ -1884,13 +1823,12 @@ async def alerts_page():
             <div style="color:var(--muted);font-size:13px;text-transform:uppercase;letter-spacing:.16em">Alertas activas en tiempo real</div>
         </div>
         <div style="display:flex;gap:10px;flex-wrap:wrap">
-            <button class="scan-btn" id="refreshDataBtn" type="button">🔄 ACTUALIZAR</button>
             <button class="scan-btn" id="manualScanBtn" type="button">⚡ SCAN AHORA</button>
             <a class="back" href="/">← Dashboard</a>
         </div>
     </header>
     <section class="panel">
-        <div class="panel-head">Feed activo — pulsa Actualizar</div>
+        <div class="panel-head">Feed activo — auto-refresh 30s</div>
         <table>
             <thead>
                 <tr><th>Fecha</th><th>Ticker</th><th>Score</th><th>Tier</th><th>Dirección</th><th>Contrato</th><th>Nominal</th><th>Entry</th><th>SL</th><th>TP1</th><th>TP2</th><th>Status</th></tr>
@@ -1957,28 +1895,8 @@ async def alerts_page():
                 body.innerHTML = `<tr><td colspan="12" class="empty">Error cargando alertas: ${escapeHtml(error.message)}</td></tr>`;
             }
         }
-        async function triggerDataRefresh(button) {
-            if (!button || button.disabled) return;
-            const original = button.textContent;
-            button.disabled = true;
-            button.textContent = "⏳...";
-            try {
-                await fetch("/api/data/refresh", { method: "POST", cache: "no-store" });
-                await loadAlerts();
-                button.textContent = "✓";
-            } catch (error) {
-                button.textContent = "Error";
-            }
-            setTimeout(() => { button.disabled = false; button.textContent = original; }, 1200);
-        }
-        document.getElementById("refreshDataBtn").addEventListener("click", (event) => triggerDataRefresh(event.currentTarget));
-        document.getElementById("manualScanBtn").addEventListener("click", async (event) => {
-            const button = event.currentTarget;
-            button.disabled = true;
-            try { await fetch("/api/scan/manual", { method: "POST", cache: "no-store" }); } catch (_) {}
-            setTimeout(() => { button.disabled = false; loadAlerts(); }, 15000);
-        });
         loadAlerts();
+        setInterval(loadAlerts, 30000);
     </script>
 </body>
 </html>
@@ -2024,13 +1942,12 @@ async def watchlist_page():
             <div style="color:var(--muted);font-size:13px;text-transform:uppercase;letter-spacing:.16em">Tickers activos que monitorea el scanner</div>
         </div>
         <div style="display:flex;gap:10px;flex-wrap:wrap">
-            <button class="scan-btn" id="refreshDataBtn" type="button">🔄 ACTUALIZAR</button>
             <button class="scan-btn" id="manualScanBtn" type="button">⚡ SCAN AHORA</button>
             <a class="back" href="/">← Dashboard</a>
         </div>
     </header>
     <section class="panel">
-        <div class="panel-head">Gestión de watchlist — pulsa Actualizar para precios UW</div>
+        <div class="panel-head">Gestión de watchlist</div>
         <form id="addForm">
             <input id="tickerInput" placeholder="Ticker, ej: NVDA" maxlength="10" required />
             <input id="notesInput" placeholder="Notas opcionales" />
@@ -2081,21 +1998,6 @@ async def watchlist_page():
                 loadWatchlist();
             }, 15000);
         }
-        async function triggerDataRefresh(button) {
-            if (!button || button.disabled) return;
-            const original = button.textContent;
-            button.disabled = true;
-            button.textContent = "⏳...";
-            try {
-                await fetch("/api/data/refresh", { method: "POST", cache: "no-store" });
-                await loadWatchlist();
-                button.textContent = "✓";
-            } catch (error) {
-                button.textContent = "Error";
-            }
-            setTimeout(() => { button.disabled = false; button.textContent = original; }, 1200);
-        }
-        document.getElementById("refreshDataBtn").addEventListener("click", (event) => triggerDataRefresh(event.currentTarget));
         document.getElementById("manualScanBtn").addEventListener("click", (event) => triggerManualScan(event.currentTarget));
         document.getElementById("addForm").addEventListener("submit", async (event) => {
             event.preventDefault();
@@ -2219,50 +2121,42 @@ async def get_backtest(limit: int = Query(50), db: Session = Depends(get_db)):
         raise HTTPException(500, f"backtest_error: {type(e).__name__}: {e}")
 
 
-@app.post("/api/data/refresh")
-async def refresh_uw_data():
-    try:
-        return await _refresh_uw_cache()
-    except Exception as e:
-        logger.exception("refresh_uw_data error")
-        raise HTTPException(500, f"refresh_uw_error: {type(e).__name__}: {e}")
-
-
 @app.get("/api/market-tide")
 async def get_market_tide():
-    if _uw_cache["market_tide"] is not None:
-        return _uw_cache["market_tide"]
-    return {
-        "net_call_premium": 0,
-        "net_put_premium": 0,
-        "net_volume": 0,
-        "market_direction": "NEUTRAL",
-        "call_improving": False,
-        "bullish": False,
-        "stale": True,
-        "message": "Pulsa Actualizar para cargar Market Tide desde Unusual Whales.",
-    }
+    try:
+        from core.uw_fetcher import UWFetcher
+        tide = await UWFetcher().get_market_tide()
+        return tide or {
+            "net_call_premium": 0,
+            "net_put_premium": 0,
+            "net_volume": 0,
+            "market_direction": "NEUTRAL",
+            "call_improving": False,
+            "bullish": False,
+        }
+    except Exception as e:
+        logger.exception("get_market_tide error")
+        raise HTTPException(500, f"market_tide_error: {type(e).__name__}: {e}")
 
 
 @app.get("/api/macro")
 async def get_macro():
-    if _uw_cache["macro"] is not None:
-        return _uw_cache["macro"]
-    return {
-        "has_event_today": False,
-        "has_event_tomorrow": False,
-        "events_today": [],
-        "events_tomorrow": [],
-        "stale": True,
-        "message": "Pulsa Actualizar para cargar el calendario macro.",
-    }
+    try:
+        from core.uw_fetcher import UWFetcher
+        return await UWFetcher().get_macro_calendar()
+    except Exception as e:
+        logger.exception("get_macro error")
+        raise HTTPException(500, f"macro_error: {type(e).__name__}: {e}")
 
 
 @app.get("/api/rollovers")
 async def get_rollovers():
-    if _uw_cache["rollovers"] is not None:
-        return _uw_cache["rollovers"]
-    return []
+    try:
+        from core.uw_fetcher import UWFetcher
+        return await UWFetcher().detect_rollover()
+    except Exception as e:
+        logger.exception("get_rollovers error")
+        raise HTTPException(500, f"rollovers_error: {type(e).__name__}: {e}")
 
 
 async def _run_manual_scan():
@@ -2309,7 +2203,18 @@ async def update_alert(
 @app.get("/api/watchlist")
 async def get_watchlist(db: Session = Depends(get_db)):
     items = db.query(WatchlistItem).filter(WatchlistItem.active == True).all()
-    screener_by_ticker = _uw_cache.get("screener_by_ticker") or {}
+    screener_by_ticker = {}
+    try:
+        from core.uw_fetcher import UWFetcher
+        uw = UWFetcher()
+        screener = await uw.get_screener(limit=50)
+        screener_by_ticker = {
+            str(row.get("ticker", "")).upper(): row
+            for row in screener
+            if row.get("ticker")
+        }
+    except Exception as e:
+        logger.warning(f"watchlist screener hydrate error: {e}")
 
     def as_float(value, default=0):
         try:
@@ -2346,8 +2251,10 @@ async def get_watchlist(db: Session = Depends(get_db)):
             .order_by(Alert.created_at.desc())
             .first()
         )
-        current_price = as_float(screener_row.get("prev_close"), None)
-        change_pct = day_change_pct(screener_row)
+        current_price = item_price if (item_price := getattr(i, "current_price", None)) else as_float(screener_row.get("prev_close"), None)
+        change_pct = getattr(i, "day_change_pct", None)
+        if change_pct is None:
+            change_pct = day_change_pct(screener_row)
         if latest:
             current_price = latest.current_price or latest.entry_price or current_price
             if latest.entry_price and current_price:
@@ -2386,9 +2293,5 @@ async def remove_watchlist(item_id: int, db: Session = Depends(get_db)):
 
 
 if __name__ == "__main__":
-    from core.runtime import require_cloud_or_exit
-
-    require_cloud_or_exit("main.py")
     import uvicorn
-
     uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", 8000)))

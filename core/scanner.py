@@ -15,7 +15,7 @@ from core.icc_engine import ICCDetector, RegimeDetector, ICCPhase, ICCDirection
 from core.institutional_rules import TIER_ALERT
 from core.scorer import LivermoreScorer, DarkPoolSignal, OptionsFlowSignal, MacroContext
 from core.uw_fetcher import UWFetcher, classify_ticker, normalize_occ_contract
-from core.models import Alert, WatchlistItem, SessionLocal
+from core.models import Alert, WatchlistItem, ContractFlowSnapshot, SessionLocal
 
 logger = logging.getLogger("livermore.scanner")
 NY_TZ  = pytz.timezone("America/New_York")
@@ -102,6 +102,98 @@ class LivermoreScanner:
         self.ticker_delay = float(os.getenv("SCAN_TICKER_DELAY_SECONDS", "4.0"))
         self.max_scan_tickers = int(os.getenv("MAX_SCAN_TICKERS", "20"))
 
+    def _compute_flow_acceleration(self, contract: str, ticker: str,
+                                   accumulated: float, flow_count: int) -> dict:
+        """
+        Memoria de flujo entre scans. Compara el acumulado actual del contrato
+        contra el último snapshot guardado y calcula la derivada.
+
+        Devuelve: delta_nominal, accel_ratio, is_accelerating.
+        Persiste el snapshot de este scan para la próxima comparación.
+        """
+        result = {"delta_nominal": 0.0, "accel_ratio": 0.0, "is_accelerating": False}
+        if not contract or contract in ("", "--"):
+            return result
+
+        # Umbral mínimo de crecimiento para considerar "acelerando" (anti-ruido)
+        MIN_DELTA = 25_000  # $25K de crecimiento nuevo
+
+        db = SessionLocal()
+        try:
+            prev = (
+                db.query(ContractFlowSnapshot)
+                .filter(ContractFlowSnapshot.contract == contract)
+                .order_by(ContractFlowSnapshot.snapshot_at.desc())
+                .first()
+            )
+            prev_accum = float(prev.accumulated_nominal) if prev else 0.0
+
+            delta = accumulated - prev_accum
+            accel_ratio = (delta / prev_accum) if prev_accum > 0 else 0.0
+            # Acelera si creció de forma material vs el scan anterior.
+            # Primer avistamiento (prev=0) NO cuenta como aceleración: es nivel, no derivada.
+            is_accel = bool(prev and delta >= MIN_DELTA)
+
+            result = {
+                "delta_nominal": round(delta, 2),
+                "accel_ratio": round(accel_ratio, 4),
+                "is_accelerating": is_accel,
+            }
+
+            snap = ContractFlowSnapshot(
+                contract=contract,
+                ticker=ticker,
+                accumulated_nominal=accumulated,
+                flow_count=flow_count,
+                prev_accumulated=prev_accum,
+                delta_nominal=round(delta, 2),
+                accel_ratio=round(accel_ratio, 4),
+                is_accelerating=is_accel,
+            )
+            db.add(snap)
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            logger.warning(f"flow_acceleration error para {contract}: {e}")
+        finally:
+            db.close()
+
+        return result
+
+    async def hydrate_watchlist_prices(self):
+        """
+        Recorre el watchlist activo y guarda current_price/prev_close/day_change_pct
+        en la tabla. El endpoint /api/watchlist lee de aquí (no llama UW por request).
+        Pensado para correr en el loop del scanner (background).
+        """
+        db = SessionLocal()
+        updated = 0
+        try:
+            items = db.query(WatchlistItem).filter(WatchlistItem.active == True).all()
+            for item in items:
+                ticker = item.ticker.upper()
+                try:
+                    quote = await self.uw.get_stock_price(ticker)
+                except Exception as e:
+                    logger.warning(f"hydrate precio {ticker}: {e}")
+                    quote = None
+                if not quote:
+                    continue
+                item.current_price    = quote["price"]
+                item.prev_close       = quote.get("prev_close")
+                item.day_change_pct   = quote.get("change_pct", 0)
+                item.price_updated_at = datetime.utcnow()
+                updated += 1
+                await asyncio.sleep(0.3)  # cortesía con rate limit de UW
+            db.commit()
+            logger.info(f"watchlist precios hidratados: {updated}/{len(items)}")
+        except Exception as e:
+            db.rollback()
+            logger.error(f"hydrate_watchlist_prices error: {e}")
+        finally:
+            db.close()
+        return updated
+
     def is_market_hours(self) -> bool:
         now = datetime.now(NY_TZ)
         return now.weekday() < 5 and 8 <= now.hour < 20
@@ -116,8 +208,15 @@ class LivermoreScanner:
         return "REGULAR"
 
     async def run_scan(self):
+        # Hidratar precios del watchlist SIEMPRE (incluso fuera de market hours:
+        # el watchlist debe mostrar el último close aunque el mercado esté cerrado).
+        try:
+            await self.hydrate_watchlist_prices()
+        except Exception as e:
+            logger.warning(f"hydrate_watchlist_prices en run_scan: {e}")
+
         if not self.is_market_hours():
-            logger.info("Outside market hours — skipping")
+            logger.info("Outside market hours — skipping scan (precios ya hidratados)")
             return
 
         session = self.get_session()
@@ -256,23 +355,42 @@ class LivermoreScanner:
             )
 
         # ─── 10. Construir señal de opciones flow ─────────────
+        # Acumulación POR CONTRATO (no por ticker). _group_repeated_flow ya
+        # agrupó por contrato y dejó accumulated_nominal + flow_count.
+        # Elegible = nivel acumulado >= umbral Y al menos 2 hits en el contrato.
         opt_signal = None
         best = None
+        MIN_ACCUM = 250_000   # nivel acumulado mínimo por contrato (STOCK)
+        MIN_HITS  = 2         # nº de hits mínimo en el mismo contrato
+
         eligible_flow_alerts = [
             flow for flow in flow_alerts
-            if float(flow.get("nominal_value", 0) or 0) >= LivermoreScorer.min_nominal_for_category(category)
+            if float(flow.get("accumulated_nominal", flow.get("nominal_value", 0)) or 0) >= MIN_ACCUM
+            and int(flow.get("flow_count", 0) or 0) >= MIN_HITS
             and _flow_belongs_to_ticker(flow, ticker)
         ]
         if eligible_flow_alerts:
-            best = max(eligible_flow_alerts, key=lambda f: float(f.get("nominal_value", 0) or 0))
+            best = max(
+                eligible_flow_alerts,
+                key=lambda f: float(f.get("accumulated_nominal", f.get("nominal_value", 0)) or 0),
+            )
             nominal_value = float(best.get("nominal_value", 0) or 0)
+            accumulated   = float(best.get("accumulated_nominal", nominal_value) or nominal_value)
             vol_oi     = float(best.get("volume_oi_ratio", 0))
             has_sweep  = best.get("has_sweep", False)
             has_floor  = best.get("has_floor", False)
             ask_prem   = float(best.get("total_ask_side_prem", 0))
             executed_ask = ask_prem / nominal_value if nominal_value > 0 else 0
 
-            is_golden = (has_sweep or has_floor) and nominal_value >= 10_000_000
+            is_golden = (has_sweep or has_floor) and accumulated >= 10_000_000
+
+            # ─── DERIVADA: comparar contra el scan anterior ───
+            accel = self._compute_flow_acceleration(
+                contract=_flow_contract(best),
+                ticker=ticker,
+                accumulated=accumulated,
+                flow_count=int(best.get("flow_count", 0) or 0),
+            )
 
             opt_signal = OptionsFlowSignal(
                 volume=int(best.get("volume", 0)),
@@ -289,8 +407,11 @@ class LivermoreScanner:
                 contract=_flow_contract(best),
                 repeated_flow=bool(best.get("repeated_flow")),
                 flow_count=int(best.get("flow_count", 0) or 0),
-                accumulated_nominal=float(best.get("accumulated_nominal", nominal_value) or nominal_value),
+                accumulated_nominal=accumulated,
                 is_single_leg=bool(best.get("is_single_leg", True)),
+                delta_nominal=accel["delta_nominal"],
+                accel_ratio=accel["accel_ratio"],
+                is_accelerating=accel["is_accelerating"],
             )
 
         # ─── 11. Macro context ────────────────────────────────
