@@ -1,11 +1,13 @@
 # Referencia rápida (ver detalle en PROJECTS.md)
 
-**Dos proyectos completamente separados.** Antigravity (proyecto); chat **Aetheris** / **Forge Sanchez**.
+**Dos proyectos completamente separados.**
 
-| Proyecto | Doc maestro | Código principal |
-|----------|-------------|------------------|
-| **Livermore AI** (web / pago) | [LIVERMORE_BRAIN.md](LIVERMORE_BRAIN.md) | `main.py`, `core/*` |
-| **Antigravity** (local / agentes) | (futuro `ANTIGRAVITY_BRAIN.md`) | `app.py`, `antigravity/*` |
+| Proyecto | IA | Código principal |
+|----------|-----|------------------|
+| **Livermore AI** | Livermore Advisor | `main.py`, `core/*` |
+| **Forge Sanchez** | **Forge Chuki** | `app.py`, `antigravity/*` |
+
+Detalle: [PROJECTS.md](PROJECTS.md)
 
 Detalle y reglas de no mezclar: **[PROJECTS.md](PROJECTS.md)**
 

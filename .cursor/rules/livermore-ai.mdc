@@ -16,7 +16,7 @@ alwaysApply: true
 ## Dos proyectos separados (no mezclar)
 
 - **Livermore AI:** web de pago, `main.py`, `core/*`, Render — ver `docs/LIVERMORE_BRAIN.md`.
-- **Antigravity:** proyecto distinto, local, `app.py`, `antigravity/*`. Chat **Aetheris** = marca **Forge Sanchez** (el proyecto sigue siendo Antigravity).
+- **Forge Sanchez:** proyecto distinto, local, `app.py`, `antigravity/*`. IA **Forge Chuki** (no Livermore).
 - Ver `docs/PROJECTS.md`. Una tarea = un proyecto salvo petición explícita de Jorge.
 
 ## Fuente de datos

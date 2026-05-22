@@ -16,7 +16,7 @@ Este documento concentra **decisiones de producto y tape reading** que antes viv
 - Entrega: dashboard web + alertas Discord por tier + backtesting.
 - **No** ejecuta trades; detecta y puntúa convicción institucional.
 
-**Proyecto distinto de Antigravity** (ver [PROJECTS.md](PROJECTS.md)): Antigravity usa el chat Aetheris / Forge Sanchez; no comparte deploy ni producto con Livermore. En este repo conviven carpetas por historial, pero cada tarea de Cursor debe ser de **un solo proyecto**.
+**Proyecto distinto: Forge Sanchez** (IA **Forge Chuki**) — ver [PROJECTS.md](PROJECTS.md). No comparte deploy ni producto con Livermore. En este repo conviven carpetas por historial, pero cada tarea de Cursor debe ser de **un solo proyecto**.
 
 ---
 

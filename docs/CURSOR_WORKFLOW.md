@@ -61,18 +61,18 @@ Lee docs/LIVERMORE_BRAIN.md. [Pega decisión nueva de Claude]. Implementa y actu
 - No reemplazar archivos sueltos desde carpetas de descargas sin revisar el resto del repo.
 - No dar a Claude “control” del código — solo ideas.
 - No asumir que Render tiene el último commit sin deploy.
-- No mezclar Antigravity/XAMPP con bugs de la web de pago en la misma tarea.
+- No mezclar Forge Sanchez / XAMPP con bugs de la web de pago en la misma tarea.
 
 ---
 
 ## Dos proyectos separados (memoria fija)
 
 - **Livermore AI** — web de pago, Render, `main.py` + `core/*`.
-- **Antigravity** — local, agentes, Streamlit; chat **Aetheris** también **Forge Sanchez** (no confundir con el nombre del proyecto).
+- **Forge Sanchez** — proyecto local, agentes, Streamlit; IA **Forge Chuki**.
 
 Detalle: [PROJECTS.md](PROJECTS.md). No mezclar una tarea de ambos.
 
-Antigravity en este repo (`app.py`, `antigravity/`) no bloquea Livermore en Render; trabajar uno u otro por sesión.
+Forge Sanchez en este repo (`app.py`, `antigravity/`) no bloquea Livermore en Render; trabajar uno u otro por sesión.
 
 ---
 

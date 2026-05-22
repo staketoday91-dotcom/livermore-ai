@@ -267,7 +267,7 @@ class ChatRequest(BaseModel):
 
 @app.post("/api/chat")
 async def livermore_chat(body: ChatRequest, db: Session = Depends(get_db)):
-    """Asistente Livermore: UW API + Postgres, misma doctrina que Aetheris."""
+    """Asistente Livermore: UW API + Postgres, misma doctrina que Forge Sanchez / Forge Chuki."""
     try:
         from core.livermore_advisor import LivermoreAdvisor
 
@@ -306,7 +306,7 @@ async def advisor_page():
   <div class="wrap">
     <a class="back" href="/">← Terminal</a>
     <h1>Livermore Advisor</h1>
-    <p class="sub">Misma doctrina que Aetheris (Antigravity local). Datos vía API Unusual Whales — no es el chat de su web.</p>
+    <p class="sub">Misma doctrina que Forge Sanchez (Forge Chuki, local). Datos vía API Unusual Whales — no es el chat de su web.</p>
     <div id="log" class="log"></div>
     <div class="row">
       <input id="q" placeholder="Ej: NVDA, alertas, macro, reglas" />

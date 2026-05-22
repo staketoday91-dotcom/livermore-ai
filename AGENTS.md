@@ -14,6 +14,6 @@ Contexto obligatorio para Cursor:
 - `docs/CURSOR_WORKFLOW.md` — cómo trabajar sin doble agente
 - `core/institutional_rules.py` — reglas en código
 
-## Antigravity (proyecto separado)
+## Forge Sanchez (proyecto separado)
 
-Streamlit + agentes en `antigravity/` y `app.py`. Chat **Aetheris** / **Forge Sanchez**. **No** es Livermore. Ver [docs/PROJECTS.md](docs/PROJECTS.md).
+Streamlit + agentes en `antigravity/` y `app.py`. Proyecto **Forge Sanchez**, IA **Forge Chuki**. **No** es Livermore. Ver [docs/PROJECTS.md](docs/PROJECTS.md).

@@ -17,7 +17,7 @@ from antigravity.db import (
 )
 
 
-streamlit_app.set_page_config(page_title="Antigravity Intelligence", layout="wide")
+streamlit_app.set_page_config(page_title="Forge Sanchez", layout="wide")
 init_db()
 
 
@@ -364,7 +364,7 @@ def aetheris_reply(prompt: str) -> str:
         from core.institutional_rules import PRODUCT_ROLES, principles_block
 
         return (
-            f"Aetheris: {PRODUCT_ROLES['aetheris']}\n\n"
+            f"Forge Chuki: {PRODUCT_ROLES['aetheris']}\n\n"
             "Puedo explicarte el sesgo macro, listar los mejores candidatos, revisar por qué un ticker no fue aprobado, "
             "analizar un contrato concreto como 'ORCL put 175', resumir el flujo calificado, detectar errores de agentes "
             "y decirte qué falta para pasar de watchlist a trade.\n\n"
@@ -383,48 +383,48 @@ def aetheris_reply(prompt: str) -> str:
             )
         if plan:
             if plan["execution_status"] == "PENDING":
-                return f"Aetheris: {requested_ticker} está aprobado.{flow_context} Razón: {plan.get('approval_reason')}. Riesgo: {plan.get('risk_notes')}. Invalidación: {plan.get('invalidation')}."
-            return f"Aetheris: {requested_ticker} no está aprobado; está en estado {plan['execution_status']}.{flow_context} Bloqueo principal: {plan.get('target_zone')}. Lectura positiva: {plan.get('approval_reason')}. Riesgo: {plan.get('risk_notes')}."
+                return f"Forge Chuki: {requested_ticker} está aprobado.{flow_context} Razón: {plan.get('approval_reason')}. Riesgo: {plan.get('risk_notes')}. Invalidación: {plan.get('invalidation')}."
+            return f"Forge Chuki: {requested_ticker} no está aprobado; está en estado {plan['execution_status']}.{flow_context} Bloqueo principal: {plan.get('target_zone')}. Lectura positiva: {plan.get('approval_reason')}. Riesgo: {plan.get('risk_notes')}."
         if flow:
-            return f"Aetheris: {requested_ticker} aparece en el radar pero no tiene decisión reciente del comité.{flow_context} Necesita pasar por microestructura/comité o no alcanzó los filtros de plan."
-        return f"Aetheris: No encuentro una decisión ni flujo reciente para {requested_ticker}."
+            return f"Forge Chuki: {requested_ticker} aparece en el radar pero no tiene decisión reciente del comité.{flow_context} Necesita pasar por microestructura/comité o no alcanzó los filtros de plan."
+        return f"Forge Chuki: No encuentro una decisión ni flujo reciente para {requested_ticker}."
 
     if "top" in q or "mejor" in q or "candidato" in q:
         watch = top_watchlist(5)
         if watch:
             summary = "; ".join(f"{item['ticker']} {item['direction']} score {item['conviction_score']}" for item in watch)
-            return f"Aetheris: Los mejores candidatos en observación son: {summary}. Ninguno es ejecución automática hasta que resuelva su bloqueo principal."
-        return "Aetheris: No hay candidatos en watchlist ahora mismo."
+            return f"Forge Chuki: Los mejores candidatos en observación son: {summary}. Ninguno es ejecución automática hasta que resuelva su bloqueo principal."
+        return "Forge Chuki: No hay candidatos en watchlist ahora mismo."
 
     if "plan" in q or "operar" in q or "comprar" in q:
         if plans:
             tickers = ", ".join(plan["ticker"] for plan in plans)
-            return f"Aetheris: El Comité tiene planes pendientes en {tickers}. Revisa stop, target e invalidación antes de ejecutar."
+            return f"Forge Chuki: El Comité tiene planes pendientes en {tickers}. Revisa stop, target e invalidación antes de ejecutar."
         if watchlist:
             tickers = ", ".join(plan["ticker"] for plan in watchlist[:5])
-            return f"Aetheris: No hay trades aprobados, pero hay candidatos en observación: {tickers}. Están esperando que se resuelva su bloqueo principal antes de pasar a ejecución."
-        return "Aetheris: No hay planes aprobados. El sistema está protegiendo capital porque aún no existe alineación completa o no han entrado señales válidas."
+            return f"Forge Chuki: No hay trades aprobados, pero hay candidatos en observación: {tickers}. Están esperando que se resuelva su bloqueo principal antes de pasar a ejecución."
+        return "Forge Chuki: No hay planes aprobados. El sistema está protegiendo capital porque aún no existe alineación completa o no han entrado señales válidas."
 
     if "macro" in q or "clima" in q or "mercado" in q or "risk on" in q or "risk_off" in q or "risk off" in q or "risk_on" in q:
         if macro:
             meaning = "viento a favor para riesgo y compras selectivas" if macro["market_bias"] == "RISK_ON" else "defensa, coberturas y menor agresividad" if macro["market_bias"] == "RISK_OFF" else "zona mixta, operar solo setups muy confirmados"
-            return f"Aetheris: Sesgo actual {macro['market_bias']} significa {meaning}. Liquidez {macro['liquidity_index']}, DXY {macro['dxy_trend']} y VIX {macro['vix_level']:.2f}."
-        return "Aetheris: No hay lectura macro todavía. Ejecuta el worker o corre `python -m antigravity.worker --once --agent macro`."
+            return f"Forge Chuki: Sesgo actual {macro['market_bias']} significa {meaning}. Liquidez {macro['liquidity_index']}, DXY {macro['dxy_trend']} y VIX {macro['vix_level']:.2f}."
+        return "Forge Chuki: No hay lectura macro todavía. Ejecuta el worker o corre `python -m antigravity.worker --once --agent macro`."
 
     if "ballena" in q or "flujo" in q or "whale" in q:
         if uw_429:
-            return "Aetheris: Unusual Whales devolvió rate limit 429 recientemente. El radar está vivo, pero la fuente premium bloqueó nuevas consultas hasta el reset."
+            return "Forge Chuki: Unusual Whales devolvió rate limit 429 recientemente. El radar está vivo, pero la fuente premium bloqueó nuevas consultas hasta el reset."
         detail = ""
         if last_rejected and last_rejected.get("status") == "OBSERVED_REJECTED":
             detail = f" Último descarte: {last_rejected['ticker']} porque {last_rejected.get('rejection_reason') or 'no cumplió filtros'}."
-        return f"Aetheris: El radar observó {flows_total} flujos, calificó {flows_qualified} y descartó {flows_rejected}.{detail}"
+        return f"Forge Chuki: El radar observó {flows_total} flujos, calificó {flows_qualified} y descartó {flows_rejected}.{detail}"
 
     if "error" in q or "estado" in q or "agente" in q:
         if last_error:
-            return f"Aetheris: Última ejecución registrada: {last_error['agent_name']} terminó en estado {last_error['status']}. Mensaje: {last_error.get('message') or last_error.get('error') or 'sin detalle'}."
-        return "Aetheris: No hay ejecuciones registradas todavía."
+            return f"Forge Chuki: Última ejecución registrada: {last_error['agent_name']} terminó en estado {last_error['status']}. Mensaje: {last_error.get('message') or last_error.get('error') or 'sin detalle'}."
+        return "Forge Chuki: No hay ejecuciones registradas todavía."
 
-    return "Aetheris: Estoy conectado a la base unificada. Pregúntame por macro, planes, ballenas, errores o estado de agentes."
+    return "Forge Chuki: Estoy conectado a la base unificada. Pregúntame por macro, planes, ballenas, errores o estado de agentes."
 
 
 streamlit_app.markdown(
@@ -458,17 +458,17 @@ with streamlit_app.sidebar:
     if streamlit_app.button("🔄 Actualizar vista", type="primary", use_container_width=True):
         streamlit_app.rerun()
     streamlit_app.divider()
-    streamlit_app.markdown("## Aetheris AI")
+    streamlit_app.markdown("## Forge Chuki")
     streamlit_app.caption("Mentor operativo conectado a la base unificada.")
     if "messages" not in streamlit_app.session_state:
         streamlit_app.session_state.messages = [
-            {"role": "assistant", "content": "Director, estoy conectado al motor Antigravity. Pregúntame por macro, planes, ballenas o estado de agentes."}
+            {"role": "assistant", "content": "Director, estoy conectado a Forge Sanchez. Pregúntame por macro, planes, ballenas o estado de agentes."}
         ]
 
     for msg in streamlit_app.session_state.messages:
         streamlit_app.chat_message(msg["role"]).write(msg["content"])
 
-    user_input = streamlit_app.chat_input("Consulta a Aetheris...")
+    user_input = streamlit_app.chat_input("Consulta a Forge Chuki...")
     if user_input:
         streamlit_app.session_state.messages.append({"role": "user", "content": user_input})
         reply = aetheris_reply(user_input)

@@ -1,11 +1,10 @@
 """
-Reglas institucionales de tape reading — usadas por dos PROYECTOS SEPARADOS:
+Reglas institucionales de tape reading — dos PROYECTOS SEPARADOS:
 
-- Livermore AI (web/pago, suscriptores)
-- Antigravity (local, agentes); chat Aetheris también Forge Sanchez
+- Livermore AI (web/pago) — IA: Livermore Advisor
+- Forge Sanchez (local, agentes) — IA: Forge Chuki
 
-Misma doctrina de flujo; productos, deploy y código no se mezclan sin decisión explícita.
-Ver docs/PROJECTS.md
+Misma doctrina de flujo; productos y deploy no se mezclan. Ver docs/PROJECTS.md
 """
 from __future__ import annotations
 
@@ -34,8 +33,13 @@ PRODUCT_ROLES = {
         "Livermore AI es el producto web de pago: escanea Unusual Whales, "
         "puntúa oportunidades y alerta a suscriptores. No ejecuta trades."
     ),
+    "forge_chuki": (
+        "Forge Chuki es la IA del proyecto Forge Sanchez (local): mentora la mesa interna, "
+        "lee la base unificada de agentes y explica decisiones del comité."
+    ),
+    # Alias legado en código Streamlit
     "aetheris": (
-        "Aetheris (marca Forge Sanchez) opera en Antigravity (local): mentora la mesa interna, "
+        "Forge Chuki (proyecto Forge Sanchez): mentora la mesa interna, "
         "lee la base unificada de agentes y explica decisiones del comité."
     ),
 }
