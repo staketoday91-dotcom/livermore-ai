@@ -16,4 +16,4 @@ Contexto obligatorio para Cursor:
 
 ## Antigravity (proyecto separado)
 
-Streamlit + agentes en `antigravity/` y `app.py`. **No** es Livermore. **No** se llama Sanchez Forge. Ver [docs/PROJECTS.md](docs/PROJECTS.md).
+Streamlit + agentes en `antigravity/` y `app.py`. Chat **Aetheris** / **Forge Sanchez**. **No** es Livermore. Ver [docs/PROJECTS.md](docs/PROJECTS.md).

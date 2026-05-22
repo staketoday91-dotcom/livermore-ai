@@ -68,7 +68,7 @@ Lee docs/LIVERMORE_BRAIN.md. [Pega decisión nueva de Claude]. Implementa y actu
 ## Dos proyectos separados (memoria fija)
 
 - **Livermore AI** — web de pago, Render, `main.py` + `core/*`.
-- **Antigravity** — local, agentes, Streamlit; **no** se llamará **Sanchez Forge**.
+- **Antigravity** — local, agentes, Streamlit; chat **Aetheris** también **Forge Sanchez** (no confundir con el nombre del proyecto).
 
 Detalle: [PROJECTS.md](PROJECTS.md). No mezclar una tarea de ambos.
 

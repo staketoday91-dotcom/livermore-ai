@@ -5,7 +5,7 @@
 **Cerebro consolidado (ex-Claude):** [docs/LIVERMORE_BRAIN.md](docs/LIVERMORE_BRAIN.md)  
 **Flujo de trabajo:** [docs/CURSOR_WORKFLOW.md](docs/CURSOR_WORKFLOW.md)  
 
-**Livermore AI y Antigravity son proyectos completamente separados** (Antigravity ≠ Sanchez Forge). Ver [docs/PROJECTS.md](docs/PROJECTS.md).
+**Livermore AI y Antigravity son proyectos completamente separados.** Antigravity: chat Aetheris / Forge Sanchez. Ver [docs/PROJECTS.md](docs/PROJECTS.md).
 
 ## Objetivo
 

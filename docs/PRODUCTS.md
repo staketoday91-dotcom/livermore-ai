@@ -1,6 +1,6 @@
 # Referencia rápida (ver detalle en PROJECTS.md)
 
-**Dos proyectos completamente separados.** Antigravity **no** se llama Sanchez Forge.
+**Dos proyectos completamente separados.** Antigravity (proyecto); chat **Aetheris** / **Forge Sanchez**.
 
 | Proyecto | Doc maestro | Código principal |
 |----------|-------------|------------------|

@@ -2,7 +2,7 @@
 Reglas institucionales de tape reading — usadas por dos PROYECTOS SEPARADOS:
 
 - Livermore AI (web/pago, suscriptores)
-- Antigravity (local, agentes; nombre del producto Antigravity, NO Sanchez Forge)
+- Antigravity (local, agentes); chat Aetheris también Forge Sanchez
 
 Misma doctrina de flujo; productos, deploy y código no se mezclan sin decisión explícita.
 Ver docs/PROJECTS.md
@@ -35,7 +35,7 @@ PRODUCT_ROLES = {
         "puntúa oportunidades y alerta a suscriptores. No ejecuta trades."
     ),
     "aetheris": (
-        "Aetheris opera en Antigravity (local): mentora la mesa interna, "
+        "Aetheris (marca Forge Sanchez) opera en Antigravity (local): mentora la mesa interna, "
         "lee la base unificada de agentes y explica decisiones del comité."
     ),
 }

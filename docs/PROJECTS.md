@@ -23,12 +23,12 @@ Documentación: `docs/LIVERMORE_BRAIN.md`, `PROJECT_CHECKPOINT.md`
 | | |
 |--|--|
 | **Qué es** | Sistema **local** de agentes + dashboard Streamlit (mesa interna) |
-| **Nombre** | **Antigravity** — **no** se llamará Sanchez Forge |
+| **Nombre del proyecto** | **Antigravity** (el sistema/agentes; no renombrar el proyecto a Forge Sanchez) |
 | **Código en este repo (por ahora)** | `app.py`, `antigravity/*`, scripts `1_*.py`…`7_*.py` |
-| **Chat producto** | Aetheris (Streamlit) |
+| **Chat / mentora** | **Aetheris** — también se llama **Forge Sanchez** (marca del asistente en Streamlit) |
 | **Producción** | Local / futuro repo propio — **no** es Livermore en Render |
 
-**Sanchez Forge** puede ser el servidor de Discord u otra cosa del ecosistema Jorge; **no** es el nombre del producto Antigravity.
+**Forge Sanchez** = nombre de marca del chat (Aetheris). **Antigravity** = nombre del proyecto de software.
 
 Documentación futura: `docs/ANTIGRAVITY_BRAIN.md` (cuando exista; separado del brain de Livermore).
 
@@ -48,4 +48,4 @@ Eso **no** significa un solo producto ni un solo deploy.
 
 - Tarea “Livermore” → solo archivos Livermore + Render + Discord bot Livermore.
 - Tarea “Antigravity” → solo `app.py`, `antigravity/`, DB local, Streamlit.
-- **Nunca** renombrar Antigravity a Sanchez Forge salvo que Jorge lo pida explícitamente.
+- **Nunca** renombrar el proyecto Antigravity a Forge Sanchez; sí usar **Forge Sanchez** como nombre del chat junto con Aetheris.
