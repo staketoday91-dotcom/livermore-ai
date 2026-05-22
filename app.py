@@ -173,6 +173,27 @@ def top_watchlist(limit=5):
     return rows(TradePlan, limit=limit, order_by=TradePlan.conviction_score.desc(), filters=[TradePlan.execution_status == "WATCHLIST"])
 
 
+def top_pending_plans(limit=5):
+    """Un ticker = un plan activo; el más reciente gana."""
+    with session_scope() as session:
+        plans = (
+            session.query(TradePlan)
+            .filter(TradePlan.execution_status == "PENDING")
+            .order_by(TradePlan.updated_at.desc(), TradePlan.conviction_score.desc(), TradePlan.id.desc())
+            .all()
+        )
+        seen: set[str] = set()
+        unique = []
+        for plan in plans:
+            if plan.ticker in seen:
+                continue
+            seen.add(plan.ticker)
+            unique.append(to_dict(plan))
+            if len(unique) >= limit:
+                break
+        return unique
+
+
 def latest_agent_runs_by_name():
     with session_scope() as session:
         latest_ids = {}
@@ -257,7 +278,7 @@ def enqueue_manual_contract(model, ticker, contract_type, strike, expiry, direct
         session.add(model(**payload))
 
 
-def render_flow_card(flow):
+def render_flow_card(flow, key_prefix: str = "flow"):
     label, border = flow_priority(flow)
     side = flow.get("side") or "N/A"
     side_bg = side_color(side)
@@ -295,18 +316,19 @@ def render_flow_card(flow):
         unsafe_allow_html=True,
     )
     actions = streamlit_app.columns([1, 1, 5])
-    if actions[0].button("Monitorear", key=f"monitor-{flow['id']}"):
+    if actions[0].button("Monitorear", key=f"{key_prefix}-monitor-{flow['id']}"):
         created = enqueue_contract(ContractMonitor, flow, "ACTIVE", reason_field="watch_reason")
         actions[0].success("Activo" if created else "Ya estaba")
-    if actions[1].button("Backtest", key=f"backtest-{flow['id']}"):
+    if actions[1].button("Backtest", key=f"{key_prefix}-backtest-{flow['id']}"):
         created = enqueue_contract(BacktestContract, flow, "QUEUED")
         actions[1].success("En cola" if created else "Ya estaba")
 
 
 def render_plan_card(plan, expanded=False):
     status = plan["execution_status"]
+    updated = format_dt(plan.get("updated_at") or plan.get("created_at"))
     title = f"{plan['ticker']} | {plan['direction']} | {status} | Grade {plan.get('setup_grade') or '-'} | Score {plan['conviction_score']}"
-    with streamlit_app.expander(title, expanded=expanded):
+    with streamlit_app.expander(title, expanded=expanded, key=f"plan-{plan['id']}"):
         c1, c2, c3 = streamlit_app.columns(3)
         c1.markdown(f"**Entrada**\n\n`{plan['entry_zone']}`")
         stop_text = f"{plan['stop_loss']:.2f}" if plan.get("stop_loss") else "N/A"
@@ -314,7 +336,7 @@ def render_plan_card(plan, expanded=False):
         c3.markdown(f"**Target / Bloqueo**\n\n`{plan['target_zone']}`")
         streamlit_app.markdown(f"**Lectura institucional:** {plan.get('approval_reason') or 'Sin tesis registrada'}")
         streamlit_app.markdown(f"**Qué falta / riesgo:** {plan.get('risk_notes') or 'Confirmación pendiente'}")
-        streamlit_app.caption(f"Invalidación: {plan['invalidation']}")
+        streamlit_app.caption(f"Actualizado: {updated} | Invalidación: {plan['invalidation']}")
 
 
 def prepare_flow_dataframe(data):
@@ -329,7 +351,7 @@ def prepare_flow_dataframe(data):
 def aetheris_reply(prompt: str) -> str:
     q = prompt.lower()
     macro = latest(MarketRegime, MarketRegime.id.desc())
-    plans = rows(TradePlan, limit=10, order_by=TradePlan.id.desc(), filters=[TradePlan.execution_status == "PENDING"])
+    plans = top_pending_plans(limit=10)
     watchlist = rows(TradePlan, limit=10, order_by=TradePlan.id.desc(), filters=[TradePlan.execution_status == "WATCHLIST"])
     flows_total = count(OptionFlowSignal)
     flows_qualified = count(OptionFlowSignal, [OptionFlowSignal.status.in_(["QUALIFIED", "PLANNED"])])
@@ -431,7 +453,11 @@ streamlit_app.title("ANTIGRAVITY QUANTITATIVE FUND")
 streamlit_app.subheader("Institutional Market Intelligence Terminal")
 
 with streamlit_app.sidebar:
-    auto_refresh = streamlit_app.checkbox("Auto-refresh 30s", value=True)
+    streamlit_app.markdown("### Datos del terminal")
+    streamlit_app.caption("La vista lee la base local. No consulta Unusual Whales hasta que pulses Actualizar (o corras el worker).")
+    if streamlit_app.button("🔄 Actualizar vista", type="primary", use_container_width=True):
+        streamlit_app.rerun()
+    streamlit_app.divider()
     streamlit_app.markdown("## Aetheris AI")
     streamlit_app.caption("Mentor operativo conectado a la base unificada.")
     if "messages" not in streamlit_app.session_state:
@@ -510,7 +536,8 @@ with right:
 
 streamlit_app.divider()
 streamlit_app.markdown("## Mesa De Decisión")
-plans = rows(TradePlan, limit=5, order_by=TradePlan.conviction_score.desc(), filters=[TradePlan.execution_status == "PENDING"])
+plans = top_pending_plans(limit=5)
+streamlit_app.caption("Top trades = un plan activo por ticker, ordenado por última actualización del comité.")
 watchlist_rows = rows(TradePlan, limit=15, order_by=TradePlan.conviction_score.desc(), filters=[TradePlan.execution_status == "WATCHLIST"])
 rejected_rows = rows(TradePlan, limit=15, order_by=TradePlan.id.desc(), filters=[TradePlan.execution_status == "INVALIDATED"])
 
@@ -608,21 +635,21 @@ tab_live, tab1, tab2, tab3 = streamlit_app.tabs(["Alertas En Vivo", "Flujo Calif
 with tab_live:
     if live:
         for flow in live[:25]:
-            render_flow_card(flow)
+            render_flow_card(flow, key_prefix="live")
     else:
         streamlit_app.warning("No hay tape en vivo todavía.")
 
 with tab1:
     if qualified:
         for flow in qualified[:25]:
-            render_flow_card(flow)
+            render_flow_card(flow, key_prefix="qualified")
     else:
         streamlit_app.warning("No hay flujo calificado todavía.")
 
 with tab2:
     if rejected:
         for flow in rejected[:25]:
-            render_flow_card(flow)
+            render_flow_card(flow, key_prefix="rejected")
     else:
         streamlit_app.info("Aún no hay flujo descartado guardado.")
 
@@ -630,12 +657,7 @@ with tab3:
     flows = rows(OptionFlowSignal, limit=120, order_by=OptionFlowSignal.tape_time.desc())
     if flows:
         for flow in flows[:30]:
-            render_flow_card(flow)
+            render_flow_card(flow, key_prefix="tape")
     else:
         streamlit_app.info("Sin cinta normalizada todavía.")
 
-if auto_refresh:
-    import time
-
-    time.sleep(30)
-    streamlit_app.rerun()

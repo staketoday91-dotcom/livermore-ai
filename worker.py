@@ -13,6 +13,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from core.runtime import require_cloud_or_exit  # noqa: E402
+
+require_cloud_or_exit("worker.py")
+
 from bot.discord_bot import create_bot, run_bot  # noqa: E402
 from core.models import Base, engine  # noqa: E402
 from core.scanner import LivermoreScanner  # noqa: E402

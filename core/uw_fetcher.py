@@ -20,6 +20,7 @@ ETF_LIST = {"SPY", "QQQ", "IWM", "DIA", "XLF", "XLE", "XLK", "XLV", "XLI", "XLB"
 
 INDEX_LIST = {"SPX", "SPXW", "NDX", "RUT", "VIX", "COMP"}
 _OCC_RE = re.compile(r"^([A-Z]+)\d{6}[CP]\d{8}$")
+_OCC_PARTS_RE = re.compile(r"^([A-Z]+)(\d{6})([CP])(\d{8})$")
 
 
 def classify_ticker(ticker: str) -> str:
@@ -47,6 +48,29 @@ def normalize_occ_contract(flow_item: dict) -> str:
         if _OCC_RE.match(raw):
             return raw
     return ""
+
+
+def occ_to_copy_token(occ: str) -> str:
+    """
+    OCC → token copiable: .SPXW260520C7415
+    (punto inicial + símbolo + vencimiento + C/P + strike sin decimales)
+    """
+    raw = (occ or "").strip().upper().replace(" ", "")
+    if raw.startswith("."):
+        return raw
+    match = _OCC_PARTS_RE.match(raw)
+    if not match:
+        return f".{raw}" if raw else ""
+    symbol, expiry, cp, strike_raw = match.groups()
+    strike = int(strike_raw) // 1000
+    return f".{symbol}{expiry}{cp}{strike}"
+
+
+def format_contracts_for_copy(occ: str, chain_map: dict | None = None) -> str:
+    """Formato copiable: .SPXW260520C7420 (un solo contrato)."""
+    del chain_map  # reservado por compatibilidad de llamadas existentes
+    token = occ_to_copy_token(occ)
+    return token if token and token != "." else "--"
 
 
 def contract_ticker(contract: str) -> str:

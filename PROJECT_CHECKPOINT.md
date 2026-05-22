@@ -18,10 +18,10 @@ dashboard web, backtesting, scanner, Discord alerts y un worker 24/7.
 
 ## Reglas De Arquitectura
 
-- El web service no debe ser el proceso oficial del bot.
-- Solo un worker debe tener `DISCORD_BOT_TOKEN` real en produccion.
-- No correr `python main.py` local con token real si Railway worker esta activo.
-- Si se usa un solo proceso temporalmente, activar `RUN_WORKER_IN_WEB=true` sabiendo que puede duplicar Discord/scanner.
+- Livermore no corre en local (`core/runtime.py`); produccion en Render.
+- Un solo servicio web en cloud: API + dashboard + Discord + scanner.
+- `DISCORD_BOT_TOKEN` solo en el servicio web de Render/Railway.
+- No usar `worker.py` local; servicio worker Railway es legacy opcional.
 
 ## Cerebro De Tape Reading
 

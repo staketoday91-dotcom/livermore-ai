@@ -17,43 +17,37 @@ El proyecto corre en dos procesos separados:
 
 Esto evita bots duplicados y scans repetidos entre local, Railway u otros hosts.
 
-## Comandos Locales
+## Produccion (oficial)
 
-Instalar dependencias:
+**URL:** https://livermore-ai.onrender.com
 
-```bash
-py -3.11 -m pip install -r requirements.txt
-```
+Un solo servicio web en Render (o Railway con `python railway_entry.py`):
 
-Web/API:
+- Dashboard + API + Discord + scanner
+- En cloud se activan solos (`RENDER` / `RAILWAY_*` detectados en `core/runtime.py`)
+- Variables: `UNUSUAL_WHALES_TOKEN`, `DISCORD_BOT_TOKEN`, canales `DISCORD_*`, `DATABASE_URL`
 
-```bash
-py -3.11 main.py
-```
-
-Worker Discord + scanner:
+**No correr Livermore en local** salvo depuracion puntual:
 
 ```bash
-py -3.11 worker.py
+LIVERMORE_ALLOW_LOCAL=true RUN_WORKER_IN_WEB=true py -3.11 main.py
 ```
 
-Si necesitas correr todo en un solo proceso solo para desarrollo:
+Detener cualquier proceso local olvidado:
 
-```bash
-RUN_WORKER_IN_WEB=true py -3.11 main.py
+```powershell
+.\scripts\stop_local_livermore.ps1
 ```
 
-## Railway
+## Railway (opcional)
 
-Configura dos servicios apuntando al mismo repo:
-
-- Web start command: `python main.py`
-- Worker start command: `python worker.py`
+- Servicio unico: start `python railway_entry.py`, `LIVERMORE_SERVICE=web` (default)
+- Servicio worker legacy: `LIVERMORE_SERVICE=worker` — desaconsejado si el web ya lleva Discord
 
 Variables requeridas:
 
 - `UNUSUAL_WHALES_TOKEN`
-- `DISCORD_BOT_TOKEN` solo en el worker
+- `DISCORD_BOT_TOKEN` en el servicio web (cloud)
 - `DISCORD_GUILD_ID`
 - `DISCORD_FREE_CHANNEL`
 - `DISCORD_TIER1_CHANNEL`

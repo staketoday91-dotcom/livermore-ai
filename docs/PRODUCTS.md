@@ -23,6 +23,7 @@ Archivo único: `core/institutional_rules.py`
 
 ## Render recomendado
 
-1. **livermore-ai** (web): `python main.py` o uvicorn
-2. Variables: `DATABASE_URL`, `UNUSUAL_WHALES_TOKEN`, `ENABLE_LIVERMORE_SCANNER=true` (o servicio worker aparte)
-3. **livermore-worker** (opcional): start `python worker.py` + `DISCORD_BOT_TOKEN`
+1. **livermore-ai** (un solo servicio web): `python main.py`
+2. Variables: `DATABASE_URL`, `UNUSUAL_WHALES_TOKEN`, `DISCORD_BOT_TOKEN`, canales Discord
+3. Discord + scanner se encienden solos en Render (no hace falta `worker.py` ni local)
+4. En Render Dashboard: **Manual Deploy** tras push para aplicar cambios

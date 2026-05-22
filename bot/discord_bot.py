@@ -11,6 +11,8 @@ import pytz
 import discord
 from discord.ext import commands, tasks
 
+from core.uw_fetcher import format_contracts_for_copy
+
 logger = logging.getLogger("livermore.discord")
 NY_TZ  = pytz.timezone("America/New_York")
 _OCC_RE = re.compile(r"^([A-Z]+)\d{6}[CP]\d{8}$")
@@ -37,6 +39,13 @@ TIER3_CH         = int(os.getenv("DISCORD_TIER3_CHANNEL",    "0"))
 VIP_CH           = int(os.getenv("DISCORD_VIP_CHANNEL",      "0"))
 VICTORIES_CH     = int(os.getenv("DISCORD_VICTORIES_CHANNEL","0"))
 MOTIVACION_CH    = int(os.getenv("DISCORD_MOTIVACION_CHANNEL","0"))
+UW_CH            = int(os.getenv("DISCORD_UW_CHANNEL",         "0"))
+
+UW_WELCOME = (
+    "**Terminal Unusual Whales (privado por usuario)**\n\n"
+    "Escribe `/` y elige **uw**. Solo **tú** ves cada respuesta.\n\n"
+    "• `/uw flow ticker:SPY` · `/uw alerts` · `/uw darkpool ticker:NVDA` · `/uw tide`"
+)
 
 # Tier → channel mapping
 TIER_CHANNELS = {
@@ -66,11 +75,23 @@ class LivermoreBot(commands.Bot):
         self._quote_index = 0
 
     async def setup_hook(self):
+        from bot.uw_private import UWPrivateCog
+
+        await self.add_cog(UWPrivateCog(self))
         self.daily_tasks.start()
         logger.info("Discord bot tasks iniciados")
 
     async def on_ready(self):
         logger.info(f"Bot conectado como {self.user} — Guild: {GUILD_ID}")
+        if GUILD_ID:
+            try:
+                guild = discord.Object(id=GUILD_ID)
+                self.tree.copy_global_to(guild=guild)
+                synced = await self.tree.sync(guild=guild)
+                logger.info(f"Slash commands /uw sincronizados: {len(synced)}")
+            except Exception as e:
+                logger.error(f"Error sincronizando slash commands: {e}")
+        await self._ensure_uw_welcome()
         await self.change_presence(
             activity=discord.Activity(
                 type=discord.ActivityType.watching,
@@ -80,6 +101,20 @@ class LivermoreBot(commands.Bot):
 
     def _get_channel(self, channel_id: int):
         return self.get_channel(channel_id)
+
+    async def _ensure_uw_welcome(self):
+        if not UW_CH:
+            return
+        ch = self._get_channel(UW_CH)
+        if not ch:
+            return
+        try:
+            async for msg in ch.history(limit=20):
+                if msg.author and msg.author.id == self.user.id and "Terminal Unusual Whales" in (msg.content or ""):
+                    return
+            await ch.send(UW_WELCOME)
+        except Exception as e:
+            logger.warning(f"No pude publicar bienvenida UW en {UW_CH}: {e}")
 
     # ─── ALERTA PRINCIPAL ────────────────────────────────────────────────────
     async def send_alert(self, result: dict, alert_id: int = 0):
@@ -127,16 +162,6 @@ class LivermoreBot(commands.Bot):
             except (TypeError, ValueError):
                 return "--"
 
-        def format_contract(raw: str) -> str:
-            import re
-            match = re.match(r"^([A-Z]+)(\d{6})([CP])(\d{8})$", raw or "")
-            if not match:
-                return raw or "--"
-            symbol, expiry, cp, strike_raw = match.groups()
-            strike = (int(strike_raw) / 1000)
-            strike_text = f"{strike:g}"
-            return f"{symbol} {expiry}{cp} {strike_text}"
-
         def delta_zone(value) -> str:
             try:
                 d = abs(float(value if value is not None else 0.50))
@@ -176,7 +201,7 @@ class LivermoreBot(commands.Bot):
             "ALERT":     0x2ECC71,
         }.get(tier, 0x2ECC71)
 
-        contract_text = format_contract(contract)
+        contract_text = format_contracts_for_copy(contract, chain_map)
         ladder_strikes = chain_map.get("ladder_strikes", []) or []
         ladder_text = (
             f"✓ Detectada en strikes {'/'.join(str(s) for s in ladder_strikes[:3])}"
@@ -199,8 +224,8 @@ class LivermoreBot(commands.Bot):
 
         if contract:
             embed.add_field(
-                name="Contrato",
-                value=f"**{contract_text}** | Nominal **{money_compact(nominal)}**",
+                name="Contrato (copiar)",
+                value=f"`{contract_text}`\nNominal **{money_compact(nominal)}**",
                 inline=False
             )
 
@@ -276,7 +301,8 @@ class LivermoreBot(commands.Bot):
             color=0xD4A832,
             timestamp=datetime.now(NY_TZ)
         )
-        embed.add_field(name="Contrato", value=f"`{contract}`", inline=False)
+        contract_copy = format_contracts_for_copy(contract)
+        embed.add_field(name="Contrato (copiar)", value=f"`{contract_copy}`", inline=False)
         embed.add_field(name="Entrada",  value=f"${entry:.2f}",      inline=True)
         embed.add_field(name="Salida",   value=f"${exit_price:.2f}", inline=True)
         embed.add_field(name="P&L",      value=f"+{pnl_pct:.0f}%",  inline=True)
