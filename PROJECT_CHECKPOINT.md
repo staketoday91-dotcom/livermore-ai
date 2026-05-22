@@ -5,7 +5,7 @@
 **Cerebro consolidado (ex-Claude):** [docs/LIVERMORE_BRAIN.md](docs/LIVERMORE_BRAIN.md)  
 **Flujo de trabajo:** [docs/CURSOR_WORKFLOW.md](docs/CURSOR_WORKFLOW.md)  
 
-Antigravity/Streamlit es laboratorio local aparte; no bloquea Livermore web.
+**Livermore AI y Antigravity son proyectos completamente separados** (Antigravity ≠ Sanchez Forge). Ver [docs/PROJECTS.md](docs/PROJECTS.md).
 
 ## Objetivo
 

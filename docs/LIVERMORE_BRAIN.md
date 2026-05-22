@@ -16,7 +16,7 @@ Este documento concentra **decisiones de producto y tape reading** que antes viv
 - Entrega: dashboard web + alertas Discord por tier + backtesting.
 - **No** ejecuta trades; detecta y puntúa convicción institucional.
 
-**Fuera de alcance de este producto (por ahora):** Antigravity, Streamlit, XAMPP, scripts `1_*.py`…`7_*.py` — laboratorio local, no la web de pago.
+**Proyecto distinto de Antigravity** (ver [PROJECTS.md](PROJECTS.md)): Antigravity no se llama Sanchez Forge; no comparte deploy ni producto con Livermore. En este repo conviven carpetas por historial, pero cada tarea de Cursor debe ser de **un solo proyecto**.
 
 ---
 

@@ -14,6 +14,6 @@ Contexto obligatorio para Cursor:
 - `docs/CURSOR_WORKFLOW.md` — cómo trabajar sin doble agente
 - `core/institutional_rules.py` — reglas en código
 
-## Antigravity (laboratorio local, opcional)
+## Antigravity (proyecto separado)
 
-Streamlit + agentes en `antigravity/` y `app.py`. No es el servicio de pago en Render.
+Streamlit + agentes en `antigravity/` y `app.py`. **No** es Livermore. **No** se llama Sanchez Forge. Ver [docs/PROJECTS.md](docs/PROJECTS.md).

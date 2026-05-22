@@ -1,8 +1,11 @@
 """
-Reglas institucionales compartidas — Livermore AI (web/pago) y Antigravity/Aetheris (local).
+Reglas institucionales de tape reading — usadas por dos PROYECTOS SEPARADOS:
 
-Livermore: oportunidades UW para clientes en internet.
-Antigravity: agentes internos especializados; misma doctrina de tape reading.
+- Livermore AI (web/pago, suscriptores)
+- Antigravity (local, agentes; nombre del producto Antigravity, NO Sanchez Forge)
+
+Misma doctrina de flujo; productos, deploy y código no se mezclan sin decisión explícita.
+Ver docs/PROJECTS.md
 """
 from __future__ import annotations
 

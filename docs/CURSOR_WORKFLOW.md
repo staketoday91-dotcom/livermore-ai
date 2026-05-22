@@ -65,11 +65,14 @@ Lee docs/LIVERMORE_BRAIN.md. [Pega decisión nueva de Claude]. Implementa y actu
 
 ---
 
-## Antigravity (opcional, aparte)
+## Dos proyectos separados (memoria fija)
 
-- `app.py`, `antigravity/`, scripts `1_`–`7_` = laboratorio local.
-- No bloquea Livermore en Render.
-- Si quieres pausarlo: no lo arranques; enfócate en `main.py` + Render.
+- **Livermore AI** — web de pago, Render, `main.py` + `core/*`.
+- **Antigravity** — local, agentes, Streamlit; **no** se llamará **Sanchez Forge**.
+
+Detalle: [PROJECTS.md](PROJECTS.md). No mezclar una tarea de ambos.
+
+Antigravity en este repo (`app.py`, `antigravity/`) no bloquea Livermore en Render; trabajar uno u otro por sesión.
 
 ---
 
