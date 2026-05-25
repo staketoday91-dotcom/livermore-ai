@@ -11,7 +11,9 @@ alwaysApply: true
 
 - **Cursor implementa todo** en `livermore-ai-v2` / GitHub `staketoday91-dotcom/livermore-ai`.
 - No asumir instrucciones de otros chats como ya aplicadas: verificar `git log` y archivos.
-- Antes de diagnósticos grandes, leer `docs/LIVERMORE_BRAIN.md` y `PROJECT_CHECKPOINT.md`.
+- Antes de diagnósticos grandes o cambios en scanner/alertas/ICC: leer `docs/JORGE_DOCTRINE.md`, luego `docs/doctrine/`, luego `docs/LIVERMORE_BRAIN.md` y `PROJECT_CHECKPOINT.md`.
+- No inventar reglas de tape reading: si falta en `docs/doctrine/`, marcar PENDIENTE y pedir a Jorge.
+- ICC (`docs/doctrine/02-icc.md`): alertas Auto **solo en CONTINUATION**; 4H > 1H; no publicar en indicación/corrección ni flujo contra gráfico.
 
 ## Dos proyectos separados (no mezclar)
 
@@ -36,7 +38,8 @@ alwaysApply: true
 
 - Cambios mínimos y probables (compilar/importar o curl a APIs cuando aplique).
 - Tras cambios relevantes: commit + push `main` solo si el usuario lo pide.
-- Actualizar `docs/LIVERMORE_BRAIN.md` cuando haya decisiones de producto nuevas.
+- Doctrina Jorge (ICC, contratos, Flash/Tape/Auto): actualizar `docs/doctrine/` + changelog en `docs/JORGE_DOCTRINE.md`.
+- Producto/Render/tiers: actualizar `docs/LIVERMORE_BRAIN.md`.
 
 ## Render
 

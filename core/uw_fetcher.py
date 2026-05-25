@@ -185,6 +185,63 @@ class UWFetcher:
 
     # ─── OPTIONS FLOW ────────────────────────────────────────────────────────
 
+    async def get_jorge_option_screener(
+        self,
+        limit: Optional[int] = None,
+        watchlist_name: Optional[str] = None,
+    ) -> list[dict]:
+        """
+        Poll global — replica preset web Options Screener de Jorge.
+
+        Web: unusualwhales.com/options-screener
+        API: GET /screener/option-contracts (whitelist antigravity/docs).
+        """
+        limit = limit or int(os.getenv("UW_SCREENER_LIMIT", "150"))
+        watchlist = watchlist_name or os.getenv("UW_SCREENER_WATCHLIST", "").strip()
+        min_premium = float(os.getenv("UW_SCREENER_MIN_PREMIUM", "250000"))
+        min_ask = float(os.getenv("UW_SCREENER_MIN_ASK_PERC", "0.7"))
+        min_volume = int(os.getenv("UW_SCREENER_MIN_VOLUME", "500"))
+        max_dte = int(os.getenv("UW_SCREENER_MAX_DTE", "183"))
+        max_multileg = float(os.getenv("UW_SCREENER_MAX_MULTILEG_RATIO", "0.1"))
+
+        params: dict = {
+            "limit": limit,
+            "exclude_itm": "true",
+            "max_dte": max_dte,
+            "max_multileg_volume_ratio": max_multileg,
+            "min_ask_perc": min_ask,
+            "min_volume": min_volume,
+            "min_premium": int(min_premium),
+            "vol_greater_oi": "true",
+            "issue_types[]": ["Common Stock", "ADR"],
+        }
+        if watchlist:
+            params["watchlist_name"] = watchlist
+
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.get(
+                f"{UW_BASE}/screener/option-contracts",
+                headers=_headers(),
+                params=params,
+            )
+        if r.status_code != 200:
+            level = logger.warning if r.status_code == 429 else logger.error
+            level(
+                "option-contracts screener error %s: %s",
+                r.status_code,
+                (r.text or "")[:300],
+            )
+            return []
+        data = r.json().get("data", [])
+        logger.info(
+            "Jorge screener: %d contratos (limit=%s, min_premium=%s, watchlist=%s)",
+            len(data),
+            limit,
+            min_premium,
+            watchlist or "(none)",
+        )
+        return data
+
     async def get_flow_alerts(self, min_premium: float = 500_000) -> list[dict]:
         """Flow alerts con filtro de premium minimo."""
         async with httpx.AsyncClient(timeout=15) as client:
@@ -807,6 +864,71 @@ class UWFetcher:
         except:
             pass
         return 99
+
+    async def get_stock_ohlc(
+        self,
+        ticker: str,
+        candle_size: str = "1h",
+        limit: int = 60,
+    ) -> list:
+        """
+        Velas OHLC vía GET /stock/{ticker}/ohlc/{candle_size}.
+        candle_size: 1m, 5m, 15m, 30m, 1h, 4h, 1d, 1w (documentación UW).
+        Devuelve lista de core.icc_engine.Candle (orden cronológico ascendente).
+        """
+        from core.icc_engine import Candle
+
+        ticker = (ticker or "").upper()
+        if not ticker:
+            return []
+        size = (candle_size or "1h").lower()
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                r = await client.get(
+                    f"{UW_BASE}/stock/{ticker}/ohlc/{size}",
+                    headers=_headers(),
+                    params={"limit": min(max(int(limit), 5), 500)},
+                )
+            if r.status_code != 200:
+                logger.warning(
+                    "get_stock_ohlc(%s, %s) HTTP %s",
+                    ticker,
+                    size,
+                    r.status_code,
+                )
+                return []
+
+            payload = r.json()
+            rows = payload.get("data", payload if isinstance(payload, list) else [])
+            if not rows:
+                return []
+
+            # API suele devolver la vela más reciente primero
+            chronological = list(reversed(rows))
+            candles: list = []
+            for row in chronological:
+                close = _float(row.get("close"))
+                if close <= 0:
+                    continue
+                candles.append(
+                    Candle(
+                        open=_float(row.get("open"), close),
+                        high=_float(row.get("high"), close),
+                        low=_float(row.get("low"), close),
+                        close=close,
+                        volume=int(_float(row.get("volume"))),
+                        timestamp=str(
+                            row.get("date")
+                            or row.get("start_time")
+                            or row.get("end_time")
+                            or ""
+                        ),
+                    )
+                )
+            return candles
+        except Exception as e:
+            logger.warning(f"get_stock_ohlc({ticker}, {size}) error: {e}")
+            return []
 
     async def get_stock_price(self, ticker: str) -> Optional[dict]:
         """

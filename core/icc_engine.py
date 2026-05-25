@@ -1,6 +1,9 @@
 """
 Livermore AI — ICC Detection Engine
-Detects Indication / Correction / Continuation patterns on 1H charts
+Detects Indication / Correction / Continuation patterns on 1H charts.
+
+Doctrina operativa (swings, MTF 4H>1H>15m, solo CONTINUATION para alertas):
+  docs/doctrine/02-icc.md
 """
 
 from dataclasses import dataclass

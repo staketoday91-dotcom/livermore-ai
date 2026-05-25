@@ -1,149 +1,211 @@
 # Livermore AI — cerebro del producto (fuente única)
 
-Este documento concentra **decisiones de producto y tape reading** que antes vivían en chats de Claude.  
-**Cursor es el único ejecutor de código** en este repo. Claude (u otros) solo aportan ideas si tú las traes aquí como texto o issues.
+Este documento concentra **decisiones de producto** (tiers, Render, roadmap).  
+**La doctrina de tape reading de Jorge** vive en **[JORGE_DOCTRINE.md](JORGE_DOCTRINE.md)** y **`docs/doctrine/`** — leer eso antes que este archivo para scanner/alertas/ICC.
+
+**Cursor es el único ejecutor de código** en este repo.
 
 **Repo:** https://github.com/staketoday91-dotcom/livermore-ai  
-**Carpeta local:** `C:\Users\mcgre\Downloads\livermore-ai-v2`  
 **Producción:** https://livermore-ai.onrender.com
 
 ---
 
-## Qué es Livermore (alcance)
+## Identidad del producto
 
-- Terminal de tape reading para **suscriptores de pago**.
-- Fuente de datos: **Unusual Whales API** (no el chat de la web UW).
-- Entrega: dashboard web + alertas Discord por tier + backtesting.
-- **No** ejecuta trades; detecta y puntúa convicción institucional.
+- **No** es un scanner genérico de Unusual Whales — es el **cerebro de Jorge Sanchez automatizado**.
+- Filosofía: *"El volumen es el único lenguaje real del mercado."*
+- Modelo: **flujo + tiempo de espera + catalizador**. Institucional aguanta 5–30 días.
+- Fuente de datos: **Unusual Whales API** únicamente para diagnóstico Livermore.
+- **No** ejecuta trades; detecta, puntúa y alerta.
 
-**Proyecto distinto: Forge Sanchez** (IA **Forge Chuki**) — ver [PROJECTS.md](PROJECTS.md). No comparte deploy ni producto con Livermore. En este repo conviven carpetas por historial, pero cada tarea de Cursor debe ser de **un solo proyecto**.
+**Proyecto distinto:** Forge Sanchez (IA **Forge Chuki**) — ver [PROJECTS.md](PROJECTS.md).
+
+---
+
+## Dos tipos de “tier” (no mezclar)
+
+| Concepto | Qué es | Dónde vive |
+|----------|--------|------------|
+| **Tier de señal** | Calidad GBDS: ALERT 75+ / PREMIUM 85+ / LIVERMORE 95+ | `core/institutional_rules.py`, scorer |
+| **Tier de suscripción** | Qué paga el miembro → Discord + web + /uw | Roles Discord + Whop (futuro) |
+
+**Precios:** NO definidos aún. No usar cifras del PDF como verdad de producto.
+
+---
+
+## Matriz de beneficios por suscripción (cerrada por Jorge)
+
+### FREE
+
+| Área | Beneficio |
+|------|-----------|
+| Discord | Acceso general + `#alertas-free` |
+| Alertas | **Simples** — ticker, score, dirección; sin contrato ni niveles |
+| Web | Landing / demo limitada |
+| `/uw` | No |
+
+### Tier 2 (suscripción de pago — nombre comercial TBD)
+
+| Área | Beneficio |
+|------|-----------|
+| Discord | Alertas **más explicadas** en `#alertas-tier1` (contrato, breakdown, niveles ref) |
+| Web | **Scanner Livermore AI** — terminal en livermore-ai.onrender.com |
+| `/uw` | Tier 2+: `/uw flow`, `/uw darkpool`, `/uw tide` (ephemeral, canal UW) |
+| Señales | Recibe alertas score ≥ 75 (formato explicado) |
+
+### VIP
+
+| Área | Beneficio |
+|------|-----------|
+| Discord | Todo Tier 2 + **alertas detalladas** en `#alertas-vip` (score ≥ 85) |
+| Análisis | Contrato en detalle, dirección, **SL acción + guía SL opción** (según entrada del usuario) |
+| `/uw` | Full incl. `/uw alerts` |
+| Live | Acceso exclusivo **canal live** (`DISCORD_LIVE_CHANNEL`) — Jorge trading en vivo |
+| Futuro | Advisor, `/daytrading`, GEX/Vanna, todo lo que se construya de valor |
+
+**Roles Discord (Render env):**
+
+| Variable | Uso |
+|----------|-----|
+| `DISCORD_ROLE_TIER2_ID` | Suscripción Tier 2 |
+| `DISCORD_ROLE_VIP_ID` | Suscripción VIP |
+| `DISCORD_LIVE_CHANNEL` | Canal live exclusivo VIP |
+
+Implementación: `bot/tier_access.py`, `bot/uw_private.py`, `bot/discord_bot.py`.
 
 ---
 
 ## Doctrina (no negociable)
 
-Vive en código: `core/institutional_rules.py`. Resumen:
+Vive en `core/institutional_rules.py`:
 
 | Regla | Implementación |
 |-------|----------------|
-| Nominal en USD, no conteo de contratos | `core/uw_fetcher.py` → `nominal_value`; `core/scorer.py` |
-| STOCK / ETF / INDEX separados | `classify_ticker()`, thresholds por categoría |
-| Single-leg > multi-leg | `is_single_leg()`, penalización en scorer |
+| Nominal USD, no conteo de contratos | `uw_fetcher`, `scorer` |
+| STOCK / ETF / INDEX separados | `classify_ticker()` |
+| Single-leg > multi-leg | scorer |
 | Delta 0.30–0.70 convicción | `delta_modifier()` |
-| OI day-over-day | `get_oi_change()`, multiplicadores |
+| OI day-over-day | `get_oi_change()` |
 | Mismo contrato, flujo repetido | `_group_repeated_flow()` |
-| Escalera / put gaps | `get_option_chain_map()` |
-| Rollover | `detect_rollover()` |
+| Aceleración entre scans | `ContractFlowSnapshot` |
 | Macro FOMC/CPI/NFP/OPEX | `get_macro_calendar()` |
-| Tiers 75 / 85 / 95 | `TIER_ALERT`, `TIER_PREMIUM`, `TIER_LIVERMORE` |
+| Tiers señal 75 / 85 / 95 | `TIER_*` |
 
 ---
 
-## Decisiones cerradas (sesiones Claude → código)
+## Workflow automatizado (tipo C — objetivo)
 
-### 1. Unidad de acumulación = **contrato**, no ticker
+El pipeline **debe** replicar el flujo de Jorge: **Flash → Tape → Auto** (ver [JORGE_DOCTRINE.md](JORGE_DOCTRINE.md)).  
+Hoy en código aún predomina **scan por ticker + GBDS**; la migración a feed global + reglas explícitas está pendiente.
 
-- Agrupar por OCC (`ContractFlowSnapshot`, `_group_repeated_flow`).
-- No sumar todo el premium de TSLA mezclando strikes distintos.
+```
+UW option-contract screener (poll global) → Flash direccional → Tape → ICC → Auto → alerta
 
-### 2. Elegibilidad de flow en scanner
+**ICC (gráfico):** ver [`doctrine/02-icc.md`](doctrine/02-icc.md) — solo **CONTINUATION** para alerta; 4H > 1H; indicación/corrección = observar, no publicar.
+```
 
-- Mínimo **$250K acumulado por contrato** + **≥2 hits** en el mismo contrato.
-- Un solo print de $100K no basta; acumulación repetida sí.
+Los 20 puntos ciegos (`core/blind_spots.py`) son ayuda en Tape; **no** sustituyen la doctrina completa en `docs/doctrine/`.
 
-### 3. Aceleración entre scans (derivada)
+| # | Punto ciego | Estado |
+|---|-------------|--------|
+| 01 | Régimen chop ADX<20 | implemented |
+| 02 | Hedge vs direccional | implemented |
+| 03 | Dark pool lag | partial |
+| 04 | Calendario macro | implemented |
+| 05 | Cluster prints | implemented |
+| 06 | VWAP del print | implemented |
+| 07 | Golden sweep | implemented |
+| 08 | Ventanas 9:30–11 / 2:30–4 | implemented |
+| 09 | BURST vs STEADY | implemented |
+| 10 | Absorción silenciosa | partial |
+| 11 | GEX flip | pending (UW premium) |
+| 12 | Vanna drift | pending |
+| 13 | OPEX / charm | partial |
+| 14 | Correlación multi-mercado | pending |
+| 15 | Strike día siguiente | partial |
+| 16 | Pre-market tape | partial |
+| 17 | Futuros puente | pending |
+| 18 | Earnings DTE | implemented |
+| 19 | IVR → módulo prima | partial (futuro) |
+| 20 | Position sizing | n/a (trader) |
 
-- Tabla `contract_flow_snapshots`: compara acumulado actual vs scan anterior.
-- **LIVERMORE (95+)** exige `is_accelerating` cuando hay señal de opciones (timing en vivo).
-- Sin aceleración → techo **PREMIUM** aunque el nivel sea alto.
-
-### 4. Watchlist: precios vía scanner → DB
-
-- **No** depender del screener top-50 para precios de *tus* tickers.
-- `hydrate_watchlist_prices()` + `get_stock_price()` → `/stock/{ticker}/ohlc/1d`.
-- `/api/watchlist` lee `WatchlistItem.current_price` de Postgres.
-
-### 5. Producto 24/7 (mercado cerrado ≠ app vacía)
-
-- El scanner **no** debe abortar todo fuera de RTH.
-- Fuera de horario: analizar flujo acumulado de la sesión; hidratar precios siempre.
-- Histórico por fecha: `/api/alerts?date=YYYY-MM-DD` (solo días que el scanner guardó).
-
-### 6. Límite real de UW
-
-- `flow-alerts` **no** filtra por fecha arbitraria en la API.
-- Histórico profundo = lo que **tu DB** capturó mientras el scanner corría.
+API: `GET /api/blind-spots` — tabla de estado.
 
 ---
 
-## Mapa de archivos (Livermore)
+## Decisiones cerradas (ingeniería)
+
+1. **Unidad = contrato OCC** — $250K acum + ≥2 hits.
+2. **LIVERMORE (95+)** exige `is_accelerating`.
+3. **Watchlist precios** — `/stock/{ticker}/ohlc/1d` → DB (no screener top-50).
+4. **ICC gráfico** — `/stock/{ticker}/ohlc/1h` y `4h` → `ICCDetector`; veto si 4H contradice flujo. Validar: `python scripts/validate_flash_screener.py`.
+4. **Producto 24/7** — scanner no aborta fuera de RTH; histórico = DB propia.
+5. **`/api/alerts?date=YYYY-MM-DD`** — histórico por fecha NY.
+6. **Render:** `ENABLE_LIVERMORE_SCANNER=true`, `MAX_SCAN_TICKERS=12`.
+7. **UI web** — sistema visual Hallmark (`design.md`): terminal workbench 3 columnas, nav flotante, tema oscuro + oro Livermore; assets en `web/static/`.
+
+---
+
+## Anti-patrones
+
+- No LangGraph / ejecución autónoma Alpaca en Livermore.
+- No `core/fetcher.py` (Polygon/Tradier) para diagnóstico UW.
+- No histórico UW por fecha en API — solo DB capturada.
+- No fijar precios antes de validar beneficios y pipeline en vivo.
+- No mezclar Forge Sanchez con Livermore en la misma tarea.
+- Claude = ideas; Cursor = código.
+
+---
+
+## Mapa de archivos
 
 | Pieza | Archivo |
 |-------|---------|
-| Web + API + dashboard | `main.py` |
-| Scanner + hidratación | `core/scanner.py` |
+| Web + API | `main.py` |
+| UI Hallmark (tokens, páginas) | `web/`, `design.md`, `/static/*` |
+| Scanner | `core/scanner.py` |
 | UW API | `core/uw_fetcher.py` |
-| GBDS score | `core/scorer.py` |
-| Modelos / DB | `core/models.py` |
-| Reglas compartidas | `core/institutional_rules.py` |
-| Discord | `bot/discord_bot.py`, `bot/uw_private.py` |
-| Solo cloud por defecto | `core/runtime.py` |
-| Reglas UW (whitelist endpoints) | `antigravity/docs/UNUSUAL_WHALES_API_RULES.md` |
-
-**Ignorar para diagnóstico Livermore:** `core/fetcher.py` (Polygon/Tradier legacy).
+| GBDS + blind spots | `core/scorer.py`, `core/blind_spots.py` |
+| Discord + tiers | `bot/discord_bot.py`, `bot/uw_private.py`, `bot/tier_access.py` |
+| Worker 24/7 | `worker.py` |
+| Beta log | `docs/BETA_ALERTS.md` |
 
 ---
 
-## Render (producción)
+## Render (variables críticas)
 
-Variables críticas:
-
-| Variable | Valor recomendado |
-|----------|-------------------|
+| Variable | Valor |
+|----------|-------|
 | `ENABLE_LIVERMORE_SCANNER` | `true` |
-| `MAX_SCAN_TICKERS` | `12` (512MB RAM) |
+| `MAX_SCAN_TICKERS` | `12` |
 | `SCAN_TICKER_DELAY_SECONDS` | `5` |
-| `UNUSUAL_WHALES_TOKEN` | (secreto) |
-| `DATABASE_URL` | Postgres interno Render |
-| `DISCORD_BOT_TOKEN` | (secreto) |
-
-Tras cada push: **Manual Deploy** si no hay auto-deploy.
-
-Prueba rápida:
-
-```powershell
-Invoke-RestMethod -Method Post -Uri "https://livermore-ai.onrender.com/api/scan/manual"
-Invoke-RestMethod -Uri "https://livermore-ai.onrender.com/api/watchlist"
-Invoke-RestMethod -Uri "https://livermore-ai.onrender.com/api/stats"
-```
+| `DISCORD_ROLE_TIER2_ID` | rol Tier 2 |
+| `DISCORD_ROLE_VIP_ID` | rol VIP |
+| `DISCORD_LIVE_CHANNEL` | canal live Jorge |
+| `WHOP_WEBHOOK_SECRET` | (cuando Whop esté activo) |
 
 ---
 
-## Commits recientes (línea de tiempo)
+## Roadmap
 
-| Commit | Tema |
-|--------|------|
-| `f254c45` | Scanner 24/7, aceleración en scorer, alertas por fecha |
-| `f7cd4d5` | Hidratación precios watchlist |
-| `5c82552` | Runtime cloud, Discord UW, Antigravity en repo |
-| `c9c381b` | Livermore Advisor + institutional_rules |
-
----
-
-## Pendiente (prioridad)
-
-1. Validar en Render deploy de `f254c45` y cron cada 5 min en RTH.
-2. Confirmar alertas nuevas con `flow > 0` en horario de mercado.
-3. Rotar tokens si se pegaron en chats.
-4. Plan Free 512MB: vigilar OOM; subir plan o reducir tickers.
-5. Módulo SPX/INDEX dedicado (endpoints UW premium).
-6. `/daytrading` cuando exista modelo de contratos en tiempo real.
+| Fase | Objetivo |
+|------|----------|
+| 0 | Validar producción: flow>0, cron, OOM — ver `docs/PRODUCTION_VALIDATION.md` |
+| 1 | UI histórico, watchlist DB-only, cron extendido |
+| 2 | Roles Discord + gates /uw + Whop webhook stub |
+| 3 | Completar puntos ciegos pendientes, SPX/INDEX |
+| 4 | Whop precios TBD, beta 30 alertas, `/daytrading`, advisor VIP |
 
 ---
 
-## Cómo migrar “lo de Claude” sin perder nada
+## Whop / monetización
 
-1. **No** volver a pegar archivos desde `Nueva carpeta (2)\1s\` — ya están en GitHub si Cursor los commiteó.
-2. Si Claude tiene un chat largo con decisiones nuevas: copia solo el **párrafo de decisión** y pégalo en un issue o al inicio de un mensaje a Cursor (“añade esto a LIVERMORE_BRAIN”).
-3. Toda implementación = commit en `main` desde esta carpeta.
-4. Claude puede leer GitHub en modo consultor; **no** es segunda rama de código paralela.
+**Pendiente** hasta cerrar beta. Stub: `POST /api/whop/webhook` asigna roles Discord cuando `WHOP_WEBHOOK_SECRET` esté configurado.
+
+---
+
+## Migrar decisiones de Claude
+
+1. Copiar solo el párrafo de decisión → issue o mensaje a Cursor.
+2. Cursor actualiza este doc + código + commit.
+3. No mantener copias paralelas del repo como verdad.

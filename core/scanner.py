@@ -14,6 +14,13 @@ import pytz
 from core.icc_engine import ICCDetector, RegimeDetector, ICCPhase, ICCDirection
 from core.institutional_rules import TIER_ALERT
 from core.scorer import LivermoreScorer, DarkPoolSignal, OptionsFlowSignal, MacroContext
+from core.flash_feed import (
+    flows_for_ticker,
+    infer_direction_from_flows,
+    poll_flash_universe,
+    tickers_from_flash,
+)
+from core.icc_chart import detect_icc_1h, mtf_conflicts, structure_bias_4h
 from core.uw_fetcher import UWFetcher, classify_ticker, normalize_occ_contract
 from core.models import Alert, WatchlistItem, ContractFlowSnapshot, SessionLocal
 
@@ -101,6 +108,12 @@ class LivermoreScanner:
         self.alerts_today = set()
         self.ticker_delay = float(os.getenv("SCAN_TICKER_DELAY_SECONDS", "4.0"))
         self.max_scan_tickers = int(os.getenv("MAX_SCAN_TICKERS", "20"))
+        # Feed-first: poll global UW screener (no loop ticker-a-ticker como entrada)
+        self.feed_first = os.getenv("LIVERMORE_FEED_FIRST", "true").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
 
     def _compute_flow_acceleration(self, contract: str, ticker: str,
                                    accumulated: float, flow_count: int) -> dict:
@@ -232,13 +245,27 @@ class LivermoreScanner:
         if macro_calendar.get("events"):
             logger.info(f"Eventos macro proximos: {', '.join(macro_calendar.get('events', [])[:3])}")
 
-        # Tickers activos segun UW screener (no watchlist hardcoded)
-        tickers = await self._get_tickers()
+        flash_grouped: list[dict] = []
+        if self.feed_first:
+            flash_grouped = await poll_flash_universe(self.uw)
+            tickers = tickers_from_flash(flash_grouped, self.max_scan_tickers)
+            logger.info(
+                "Feed-first: %d contratos → %d tickers direccionales (max %d)",
+                len(flash_grouped),
+                len(tickers),
+                self.max_scan_tickers,
+            )
+        else:
+            tickers = await self._get_tickers()
+            logger.info("Modo legacy: %d tickers desde screener stocks + flow", len(tickers))
+
+        if not tickers and not self.feed_first:
+            tickers = await self._get_tickers()
+
         rollovers = await self.uw.detect_rollover()
         rollover_targets = {r["to_ticker"] for r in rollovers if r.get("to_ticker")}
         if rollovers:
             logger.info(f"Rollovers detectados: {len(rollovers)}")
-            # Si el ticker destino del rollover está en watchlist, boost su score
             for r in rollovers:
                 if r["to_ticker"] in tickers:
                     logger.info(f"ROLLOVER → {r['to_ticker']} desde {r['from_ticker']}")
@@ -246,16 +273,18 @@ class LivermoreScanner:
 
         for ticker in tickers:
             try:
+                seed = flows_for_ticker(flash_grouped, ticker) if flash_grouped else None
                 result = await self._analyze_ticker(
                     ticker,
                     session,
                     market_tide,
                     macro_calendar,
                     rollover_detected=ticker in rollover_targets,
+                    seed_flows=seed,
                 )
                 if result:
                     results.append(result)
-                await asyncio.sleep(self.ticker_delay)
+                await asyncio.sleep(self.ticker_delay if not flash_grouped else 1.0)
             except Exception as e:
                 logger.error(f"Error {ticker}: {e}")
 
@@ -268,10 +297,15 @@ class LivermoreScanner:
         logger.info(f"Scan completo — {len(results)} analizados, "
                     f"{sum(1 for r in results if r['score'] >= TIER_ALERT)} alertas")
 
-    async def _analyze_ticker(self, ticker: str, session: str,
-                               market_tide: Optional[dict],
-                               macro_calendar: Optional[dict],
-                               rollover_detected: bool = False) -> Optional[dict]:
+    async def _analyze_ticker(
+        self,
+        ticker: str,
+        session: str,
+        market_tide: Optional[dict],
+        macro_calendar: Optional[dict],
+        rollover_detected: bool = False,
+        seed_flows: Optional[list[dict]] = None,
+    ) -> Optional[dict]:
 
         # ─── 1. Datos del ticker via UW ──────────────────────
         ticker_data = await self.uw.get_ticker_data(ticker)
@@ -285,7 +319,10 @@ class LivermoreScanner:
             return None
 
         # ─── 2. Flow de opciones del ticker ──────────────────
-        flow_alerts = await self.uw.get_ticker_flow(ticker)
+        if seed_flows:
+            flow_alerts = seed_flows
+        else:
+            flow_alerts = await self.uw.get_ticker_flow(ticker)
         oi_data = await self.uw.get_oi_change(ticker)
 
         # ─── 3. Dark pool ─────────────────────────────────────
@@ -301,11 +338,15 @@ class LivermoreScanner:
         # ─── 6. Earnings DTE ──────────────────────────────────
         earnings_dte = await self.uw.get_earnings_dte(ticker)
 
-        # ─── 7. Determinar direccion via net premium ──────────
+        # ─── 7. Dirección: Flash screener (C/P) luego net premium ──
         direction = ICCDirection.BULLISH
-        if net_prem:
-            if net_prem.get("bearish_pressure"):
-                direction = ICCDirection.BEARISH
+        flow_dir = infer_direction_from_flows(flow_alerts) if seed_flows else None
+        if flow_dir == "BEARISH":
+            direction = ICCDirection.BEARISH
+        elif flow_dir == "BULLISH":
+            direction = ICCDirection.BULLISH
+        elif net_prem and net_prem.get("bearish_pressure"):
+            direction = ICCDirection.BEARISH
 
         # Confirmar con market tide
         if market_tide:
@@ -314,34 +355,61 @@ class LivermoreScanner:
                 # Contra la marea — reducir conviccion
                 pass
 
-        # ─── 8. ICC simulado con net premium como proxy ───────
-        # Sin candles 1H de UW Basic, usamos net premium como señal de
-        # continuation: call premium sube = continuation bullish
+        # ─── 8. ICC en gráfico (1H + veto 4H) ─────────────────
         icc_score = 0
         icc_phase = ICCPhase.NONE
+        icc_signal = "none"
+        icc_limit_1h = int(os.getenv("ICC_1H_LIMIT", "60"))
+        icc_limit_4h = int(os.getenv("ICC_4H_LIMIT", "24"))
+        use_proxy = os.getenv("ICC_USE_NET_PREMIUM_PROXY", "false").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
 
-        if net_prem:
+        candles_1h = await self.uw.get_stock_ohlc(ticker, "1h", limit=icc_limit_1h)
+        candles_4h = await self.uw.get_stock_ohlc(ticker, "4h", limit=icc_limit_4h)
+        bias_4h = structure_bias_4h(candles_4h)
+
+        if mtf_conflicts(direction, bias_4h):
+            logger.info(
+                f"{ticker}: veto MTF — flujo {direction.value} vs 4H {bias_4h}"
+            )
+            return None
+
+        if len(candles_1h) >= 5:
+            icc_result, _ = detect_icc_1h(candles_1h, direction)
+            icc_score = icc_result.score
+            icc_phase = icc_result.phase
+            icc_signal = icc_result.signal_type or "uw_1h"
+            if icc_result.phase != ICCPhase.CONTINUATION:
+                logger.debug(
+                    f"{ticker}: ICC 1H {icc_result.phase.value} — {icc_result.description}"
+                )
+        elif use_proxy and net_prem:
             call_prem = float(net_prem.get("net_call_premium", 0))
-            put_prem  = float(net_prem.get("net_put_premium", 0))
             call_trend = float(net_prem.get("call_trend", 0))
-
             if direction == ICCDirection.BULLISH:
                 if call_prem > 0:
                     icc_score += 15
                 if call_trend > 0:
                     icc_score += 10
                     icc_phase = ICCPhase.CONTINUATION
-                if call_prem > 200_000:
-                    icc_score += 10
+                    icc_signal = "net_premium_continuation"
             else:
-                if put_prem < 0:
+                if float(net_prem.get("net_put_premium", 0)) < 0:
                     icc_score += 15
                 if float(net_prem.get("put_trend", 0)) < 0:
                     icc_score += 10
                     icc_phase = ICCPhase.CONTINUATION
+                    icc_signal = "net_premium_continuation"
+            logger.warning(f"{ticker}: ICC proxy net_premium (sin velas 1H)")
+        else:
+            logger.info(f"{ticker}: sin velas 1H suficientes — omitido")
+            return None
 
         if icc_phase != ICCPhase.CONTINUATION:
-            return None  # Solo alertar en continuation
+            return None
 
         # ─── 9. Construir señal de dark pool ──────────────────
         dp_signal = None
@@ -479,7 +547,7 @@ class LivermoreScanner:
             "category":   category,
             "direction":  direction.value,
             "icc_phase":  icc_phase.value,
-            "icc_signal": "net_premium_continuation",
+            "icc_signal": icc_signal,
             "regime":     regime,
             "session":    session,
             "entry":      round(entry, 2),
